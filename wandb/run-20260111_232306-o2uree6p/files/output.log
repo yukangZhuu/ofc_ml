@@ -1,0 +1,21 @@
+[34m[1mwandb[0m: logging graph, to disable use `wandb.watch(log_graph=False)`
+Epoch 20/200 - Train Loss: 0.164011 - Val Loss: 0.064135 - LR: 0.001000
+Epoch 40/200 - Train Loss: 0.091835 - Val Loss: 0.047260 - LR: 0.001000
+Epoch 60/200 - Train Loss: 0.078951 - Val Loss: 0.049974 - LR: 0.001000
+Epoch 80/200 - Train Loss: 0.067506 - Val Loss: 0.022970 - LR: 0.001000
+Epoch 100/200 - Train Loss: 0.066333 - Val Loss: 0.042609 - LR: 0.000500
+Epoch 120/200 - Train Loss: 0.050723 - Val Loss: 0.029128 - LR: 0.000500
+Epoch 140/200 - Train Loss: 0.040933 - Val Loss: 0.016377 - LR: 0.000500
+Epoch 160/200 - Train Loss: 0.047700 - Val Loss: 0.021733 - LR: 0.000250
+Epoch 180/200 - Train Loss: 0.040090 - Val Loss: 0.019370 - LR: 0.000125
+Early stopping at epoch 180
+Final Validation MSE: 1.141100
+Final Validation RMSE: 1.068223
+Final Validation MAE: 0.442198
+
+Prediction statistics (non-zero only):
+  Mean: 17.3758
+  Std: 3.4829
+  Min: -8.8576
+  Max: 19.3813
+  Count: 1696

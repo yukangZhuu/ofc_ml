@@ -42,5 +42,13 @@ def preprocess_features(train_df, test_df):
     print(f"  - Scalar features (num): {len(num_cols)}")
     print(f"  - Categorical features: {len(cat_cols)}")
     print(f"  - Mask features: {len(mask_cols)}")
+    print(f"  - Total: {X_train.shape[1]}")
+    
+    print(f"Train shape: {X_train.shape}")
+    print(f"Test shape: {X_test.shape}")
+    
+    if X_train.shape[1] != X_test.shape[1]:
+        print(f"WARNING: Feature dimension mismatch!")
+        print(f"  Train: {X_train.shape[1]}, Test: {X_test.shape[1]}")
     
     return X_train, X_test, mask_cols, preprocessor

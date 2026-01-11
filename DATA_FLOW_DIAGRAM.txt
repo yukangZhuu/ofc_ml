@@ -1,0 +1,289 @@
+# Detailed Data Flow Diagram
+
+## Forward Pass Data Flow
+
+```
+SAMPLE INPUT (Single Sample)
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  Spectral Features (95): [-36.89, -34.62, ..., -37.06]                      │
+│  Scalar Features (4): [18.0, 0.0, -36.89, 4.8]                              │
+│  Categorical Features (3): ['aging', 'booster', 0]                          │
+│  Mask Features (95): [0.0, 0.0, ..., 1.0]                                   │
+└─────────────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+                    ┌─────────────────┐
+                    │ PREPROCESSING   │
+                    │ • StandardScaler│
+                    │ • OneHotEncoder │
+                    └────────┬────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  PROCESSED FEATURES (197 total)                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │ Spectral (95): Standardized z-scores                                │    │
+│  │ Scalar (4): Standardized z-scores                                   │    │
+│  │ Categorical (~6-9): One-hot encoded vectors                         │    │
+│  │ Mask (95): Binary values (0 or 1)                                   │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────────────────────┘
+                            │
+              ┌─────────────┴─────────────┐
+              │                           │
+              ▼                           ▼
+┌──────────────────────────┐  ┌──────────────────────────┐
+│   SPECTRAL BRANCH        │  │   SCALAR BRANCH          │
+│                          │  │                          │
+│ Input: (95)              │  │ Input: (~105-108)        │
+│                          │  │                          │
+│ ┌──────────────────────┐ │  │ ┌──────────────────────┐ │
+│ │ Reshape to (1,95)    │ │  │ │ Linear: ~105→256     │ │
+│ └──────────┬───────────┘ │  │ │ BN + ReLU + Drop(0.3)│ │
+│            │             │  │ └──────────┬───────────┘ │
+│            ▼             │  │            │             │
+│ ┌──────────────────────┐ │  │            ▼             │
+│ │ Conv1d: 1→32, k=7    │ │  │ ┌──────────────────────┐ │
+│ │ Output: (32,95)      │ │  │ │ Linear: 256→128      │ │
+│ │ BN + ReLU + Drop(0.2)│ │  │ │ BN + ReLU + Drop(0.3)│ │
+│ └──────────┬───────────┘ │  │ └──────────┬───────────┘ │
+│            │             │  │            │             │
+│            ▼             │  │            ▼             │
+│ ┌──────────────────────┐ │  │ Output: (128)            │
+│ │ Conv1d: 32→64, k=5   │ │  │                          │
+│ │ Output: (64,95)      │ │  │                          │
+│ │ BN + ReLU + Drop(0.2)│ │  │                          │
+│ └──────────┬───────────┘ │  │                          │
+│            │             │  │                          │
+│            ▼             │  │                          │
+│ ┌──────────────────────┐ │  │                          │
+│ │ Conv1d: 64→128, k=3  │ │  │                          │
+│ │ Output: (128,95)     │ │  │                          │
+│ │ BN + ReLU + Drop(0.2)│ │  │                          │
+│ └──────────┬───────────┘ │  │                          │
+│            │             │  │                          │
+│            ▼             │  │                          │
+│ ┌──────────────────────┐ │  │                          │
+│ │ Conv1d: 128→128, k=3 │ │  │                          │
+│ │ Output: (128,95)     │ │  │                          │
+│ │ BN + ReLU + Drop(0.2)│ │  │                          │
+│ └──────────┬───────────┘ │  │                          │
+│            │             │  │                          │
+│            ▼             │  │                          │
+│ ┌──────────────────────┐ │  │                          │
+│ │ Squeeze: (128)       │ │  │                          │
+│ └──────────┬───────────┘ │  │                          │
+│            │             │  │                          │
+│            ▼             │  │                          │
+│ ┌──────────────────────┐ │  │                          │
+│ │ Spectral Attn:       │ │  │                          │
+│ │ 128→32→128           │ │  │                          │
+│ │ Sigmoid gating       │ │  │                          │
+│ └──────────┬───────────┘ │  │                          │
+│            │             │  │                          │
+│            ▼             │  │                          │
+│ ┌──────────────────────┐ │  │                          │
+│ │ Multi-Head Attn:     │ │  │                          │
+│ │ 4 heads, d=32        │ │  │                          │
+│ │ Global context       │ │  │                          │
+│ └──────────┬───────────┘ │  │                          │
+│            │             │  │                          │
+│            ▼             │  │                          │
+│      Output: (128)       │  │      Output: (128)       │
+└────────────┬─────────────┘  └────────────┬─────────────┘
+             │                             │
+             └───────────┬─────────────────┘
+                         ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                     CROSS-MODAL FUSION                                 │
+│                                                                        │
+│ Spectral (128) ──┐                                                     │
+│                  │                                                     │
+│                  ▼                                                     │
+│          ┌────────────────┐                                            │
+│          │ Linear: 128→256│                                            │
+│          └───────┬────────┘                                            │
+│                  │                                                     │
+│                  ▼                                                     │
+│ Scalar (128) ────┼──┐                                                  │
+│                  │  │                                                  │
+│                  ▼  ▼                                                  │
+│          ┌────────────────┐                                            │
+│          │ Linear: 128→256│                                            │
+│          └───────┬────────┘                                            │
+│                  │                                                     │
+│                  ▼                                                     │
+│          ┌───────────────┐                                             │
+│          │ Concat: 512   │                                             │
+│          └───────┬───────┘                                             │
+│                  │                                                     │
+│                  ▼                                                     │
+│          ┌────────────────┐                                            │
+│          │ Linear: 512→256│                                            │
+│          │ BN+ReLU+Drop   │                                            │
+│          └───────┬────────┘                                            │
+│                  │                                                     │
+│                  ▼                                                     │
+│          ┌───────────────┐                                             │
+│          │ Cross-Attn:   │                                             │
+│          │ 4 heads, d=64 │                                             │
+│          │ Residual +    │                                             │
+│          └───────┬───────┘                                             │
+│                  │                                                     │
+│                  ▼                                                     │
+│          Output: (256)                                                 │
+└────────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         DECODER                                             │
+│                                                                             │
+│ Input: (256)                                                                │
+│       │                                                                     │
+│       ▼                                                                     │
+│ ┌──────────────────────┐                                                    │
+│ │ Linear: 256→256      │                                                    │
+│ │ BN + ReLU + Drop(0.3)│                                                    │
+│ └──────────┬───────────┘                                                    │
+│            │                                                                │
+│            ▼                                                                │
+│ ┌──────────────────────┐                                                    │
+│ │ Linear: 256→128      │                                                    │
+│ │ BN + ReLU + Drop(0.2)│                                                    │
+│ └──────────┬───────────┘                                                    │
+│            │                                                                │
+│            ▼                                                                │
+│ ┌──────────────────────┐                                                    │
+│ │ Linear: 128→95       │                                                    │
+│ │ No Activation        │                                                    │
+│ └──────────┬───────────┘                                                    │
+│            │                                                                │
+│            ▼                                                                │
+│      Output: (95)                                                           │
+└─────────────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    PREDICTED GAIN SPECTRUM                                  │
+│                                                                             │
+│  [18.41, 18.41, 18.41, ..., 18.41]                                          │
+│                                                                             │
+│  (95 frequency channels, gain values in dB)                                 │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+## Key Processing Steps
+
+### 1. Spectral Feature Processing
+- **Input**: 95 frequency bins representing input power spectrum
+- **CNN Operations**: 
+  - Layer 1 (k=7): Captures broad spectral trends
+  - Layer 2 (k=5): Captures medium-scale patterns
+  - Layer 3 (k=3): Captures fine-grained details
+  - Layer 4 (k=3): Refines features
+- **Attention Mechanisms**:
+  - Spectral Attention: Learns which frequency channels are important
+  - Multi-Head Attention: Captures relationships between all channels
+
+### 2. Scalar Feature Processing
+- **Input**: Configuration parameters (gain, tilt, power) + categorical + mask
+- **MLP Operations**:
+  - Layer 1: Expands to 256 dimensions, learns complex combinations
+  - Layer 2: Compresses to 128 dimensions, refines representations
+- **Purpose**: Captures EDFA configuration effects on gain
+
+### 3. Cross-Modal Fusion
+- **Purpose**: Combines spectral and scalar information
+- **Operations**:
+  - Projection: Both branches projected to 256 dimensions
+  - Concatenation: Creates joint 512-dim representation
+  - Fusion MLP: Learns interactions between modalities
+  - Cross-Attention: Allows features to attend to each other
+- **Output**: Integrated 256-dim representation
+
+### 4. Decoding
+- **Purpose**: Maps fused representation to gain spectrum
+- **Operations**:
+  - Layer 1: Maintains 256 dims, transforms for prediction
+  - Layer 2: Reduces to 128 dims, refines predictions
+  - Output: 95 gain values (one per frequency channel)
+
+## Parameter Count Estimation
+
+```
+Spectral Branch:
+  Conv1d layers: 4
+    - Layer 1: 1×7×32 + 32 = 256
+    - Layer 2: 32×5×64 + 64 = 10,304
+    - Layer 3: 64×3×128 + 128 = 61,696
+    - Layer 4: 128×3×128 + 128 = 147,584
+  Spectral Attention: 128×32 + 32×128 = 8,192
+  Multi-Head Attention: 128×384 + 128×128 = 65,536
+  Total: ~293,568
+
+Scalar Branch:
+  MLP Layer 1: ~105×256 + 256 = ~27,136
+  MLP Layer 2: 256×128 + 128 = 32,896
+  Total: ~60,032
+
+Fusion Module:
+  Projections: 128×256 + 128×256 = 65,536
+  Fusion MLP: 512×256 + 256 = 131,328
+  Cross-Attention: 256×768 + 256×256 = 262,400
+  Total: ~459,264
+
+Decoder:
+  Layer 1: 256×256 + 256 = 65,792
+  Layer 2: 256×128 + 128 = 32,896
+  Output: 128×95 + 95 = 12,255
+  Total: ~110,943
+
+TOTAL PARAMETERS: ~923,807
+```
+
+## Training Configuration
+
+```
+Optimizer: AdamW
+  - Learning Rate: 0.0005
+  - Weight Decay: 1e-4
+  - Gradient Clipping: max_norm=1.0
+
+Scheduler: CosineAnnealingWarmRestarts
+  - T_0: 20 (initial restart period)
+  - T_mult: 2 (period multiplier)
+  - eta_min: 1e-6 (minimum learning rate)
+
+Training:
+  - Epochs: 300 (with early stopping)
+  - Batch Size: 64
+  - Validation Split: 20%
+  - Patience: 30 epochs
+  - Loss: MSE (Mean Squared Error)
+
+Regularization:
+  - Dropout: 0.2-0.3 throughout
+  - Batch Normalization: All linear/conv layers
+  - Weight Decay: 1e-4
+  - Gradient Clipping: 1.0
+```
+
+## Key Design Decisions
+
+1. **Dual-Branch Architecture**: Separates spectral and scalar processing for better feature extraction
+
+2. **Multi-Scale CNN**: Different kernel sizes (7, 5, 3) capture patterns at different frequency scales
+
+3. **Attention Mechanisms**: 
+   - Spectral attention provides interpretability
+   - Multi-head attention captures global context
+
+4. **Cross-Modal Fusion**: Allows interaction between spectral and scalar features
+
+5. **Progressive Dimensionality**: 
+   - CNN expands channels (1→32→64→128)
+   - MLP expands then compresses (105→256→128)
+   - Fusion maintains 256 dims
+   - Decoder compresses to output (256→128→95)
+
+6. **Strong Regularization**: Critical for small dataset (490 samples)

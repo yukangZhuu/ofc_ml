@@ -1,0 +1,27 @@
+2026-01-11 23:20:18,031 INFO    MainThread:74504 [wandb_setup.py:_flush():80] Current SDK version is 0.23.1
+2026-01-11 23:20:18,032 INFO    MainThread:74504 [wandb_setup.py:_flush():80] Configure stats pid to 74504
+2026-01-11 23:20:18,032 INFO    MainThread:74504 [wandb_setup.py:_flush():80] Loading settings from /Users/bytedance/.config/wandb/settings
+2026-01-11 23:20:18,032 INFO    MainThread:74504 [wandb_setup.py:_flush():80] Loading settings from /Users/bytedance/Documents/ofc_ml/wandb/settings
+2026-01-11 23:20:18,032 INFO    MainThread:74504 [wandb_setup.py:_flush():80] Loading settings from environment variables
+2026-01-11 23:20:18,032 INFO    MainThread:74504 [wandb_init.py:setup_run_log_directory():714] Logging user logs to /Users/bytedance/Documents/ofc_ml/wandb/run-20260111_232018-638xzjdt/logs/debug.log
+2026-01-11 23:20:18,032 INFO    MainThread:74504 [wandb_init.py:setup_run_log_directory():715] Logging internal logs to /Users/bytedance/Documents/ofc_ml/wandb/run-20260111_232018-638xzjdt/logs/debug-internal.log
+2026-01-11 23:20:18,032 INFO    MainThread:74504 [wandb_init.py:init():841] calling init triggers
+2026-01-11 23:20:18,032 INFO    MainThread:74504 [wandb_init.py:init():846] wandb.init called with sweep_config: {}
+config: {'learning_rate': 0.001, 'batch_size': 32, 'epochs': 200, 'optimizer': 'Adam', 'weight_decay': 1e-05, 'scheduler': 'ReduceLROnPlateau', 'patience': 20, 'factor': 0.5, 'min_lr': 1e-06, 'early_stopping_patience': 50, 'input_dim': 207, 'output_dim': 95, 'hidden_dims': [256, 128], 'dropout': 0.3, 'device': 'cpu', 'train_samples': 490, 'val_samples': 98, 'random_state': 42, 'total_params': 99167, '_wandb': {}}
+2026-01-11 23:20:18,032 INFO    MainThread:74504 [wandb_init.py:init():889] starting backend
+2026-01-11 23:20:18,310 INFO    MainThread:74504 [wandb_init.py:init():892] sending inform_init request
+2026-01-11 23:20:18,374 INFO    MainThread:74504 [wandb_init.py:init():900] backend started and connected
+2026-01-11 23:20:18,402 INFO    MainThread:74504 [wandb_init.py:init():970] updated telemetry
+2026-01-11 23:20:18,420 INFO    MainThread:74504 [wandb_init.py:init():994] communicating run to backend with 90.0 second timeout
+2026-01-11 23:20:19,815 INFO    MainThread:74504 [wandb_init.py:init():1041] starting run threads in backend
+2026-01-11 23:20:19,879 INFO    MainThread:74504 [wandb_run.py:_console_start():2521] atexit reg
+2026-01-11 23:20:19,879 INFO    MainThread:74504 [wandb_run.py:_redirect():2369] redirect: wrap_raw
+2026-01-11 23:20:19,879 INFO    MainThread:74504 [wandb_run.py:_redirect():2438] Wrapping output streams.
+2026-01-11 23:20:19,879 INFO    MainThread:74504 [wandb_run.py:_redirect():2461] Redirects installed.
+2026-01-11 23:20:19,884 INFO    MainThread:74504 [wandb_init.py:init():1081] run started, returning control to user process
+2026-01-11 23:20:19,885 INFO    MainThread:74504 [wandb_watch.py:_watch():68] Watching
+2026-01-11 23:20:27,373 INFO    MainThread:74504 [wandb_run.py:_finish():2287] finishing run zhuyukang2000-bytedance/ofc-2026-ml-challenge/638xzjdt
+2026-01-11 23:20:27,373 INFO    MainThread:74504 [wandb_run.py:_atexit_cleanup():2486] got exitcode: 0
+2026-01-11 23:20:27,373 INFO    MainThread:74504 [wandb_run.py:_restore():2468] restore
+2026-01-11 23:20:27,373 INFO    MainThread:74504 [wandb_run.py:_restore():2474] restore done
+2026-01-11 23:20:30,757 INFO    MainThread:74504 [wandb_run.py:_footer_sync_info():3862] logging synced files

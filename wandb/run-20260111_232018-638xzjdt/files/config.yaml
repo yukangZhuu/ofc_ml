@@ -1,0 +1,97 @@
+_wandb:
+    value:
+        cli_version: 0.23.1
+        e:
+            wf3xfd9tbmp14otobkojcocb70obog9l:
+                apple:
+                    ecpuCores: 4
+                    gpuCores: 19
+                    memoryGb: 32
+                    name: Apple M2 Pro
+                    pcpuCores: 8
+                    ramTotalBytes: "34359738368"
+                    swapTotalBytes: "18253611008"
+                codePath: main.py
+                codePathLocal: main.py
+                cpu_count: 12
+                cpu_count_logical: 12
+                disk:
+                    /:
+                        total: "494384795648"
+                        used: "370770001920"
+                email: zhuyukang2000@gmail.com
+                executable: /opt/miniconda3/envs/ofc/bin/python
+                git:
+                    commit: c800c6efda1be848a7e746bcfa99236348de6c0d
+                    remote: https://github.com/yukangZhuu/ofc_ml.git
+                host: CWDN2Y70WP
+                memory:
+                    total: "34359738368"
+                os: macOS-14.7.8-arm64-arm-64bit
+                program: /Users/bytedance/Documents/ofc_ml/main.py
+                python: CPython 3.12.12
+                root: /Users/bytedance/Documents/ofc_ml
+                startedAt: "2026-01-11T15:20:18.024208Z"
+                writerId: wf3xfd9tbmp14otobkojcocb70obog9l
+        m: []
+        python_version: 3.12.12
+        t:
+            "1":
+                - 1
+                - 5
+                - 53
+            "2":
+                - 1
+                - 5
+                - 53
+            "3":
+                - 1
+                - 2
+                - 13
+                - 15
+                - 16
+                - 62
+            "4": 3.12.12
+            "5": 0.23.1
+            "12": 0.23.1
+            "13": darwin-arm64
+batch_size:
+    value: 32
+device:
+    value: cpu
+dropout:
+    value: 0.3
+early_stopping_patience:
+    value: 50
+epochs:
+    value: 200
+factor:
+    value: 0.5
+hidden_dims:
+    value:
+        - 256
+        - 128
+input_dim:
+    value: 207
+learning_rate:
+    value: 0.001
+min_lr:
+    value: 1e-06
+optimizer:
+    value: Adam
+output_dim:
+    value: 95
+patience:
+    value: 20
+random_state:
+    value: 42
+scheduler:
+    value: ReduceLROnPlateau
+total_params:
+    value: 99167
+train_samples:
+    value: 490
+val_samples:
+    value: 98
+weight_decay:
+    value: 1e-05

@@ -1,0 +1,11 @@
+[34m[1mwandb[0m: logging graph, to disable use `wandb.watch(log_graph=False)`
+Traceback (most recent call last):
+  File "/Users/bytedance/Documents/ofc_ml/main.py", line 32, in <module>
+    main()
+  File "/Users/bytedance/Documents/ofc_ml/main.py", line 22, in main
+    model, metrics = train_model(X_train, y_train, preprocessor)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/bytedance/Documents/ofc_ml/src/ofc_ml/model.py", line 101, in train_model
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: ReduceLROnPlateau.__init__() got an unexpected keyword argument 'verbose'

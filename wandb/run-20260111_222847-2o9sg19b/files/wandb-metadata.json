@@ -1,0 +1,37 @@
+{
+  "os": "macOS-14.7.8-arm64-arm-64bit",
+  "python": "CPython 3.12.12",
+  "startedAt": "2026-01-11T14:28:47.305187Z",
+  "program": "/Users/bytedance/Documents/ofc_ml/main.py",
+  "codePath": "main.py",
+  "codePathLocal": "main.py",
+  "git": {
+    "remote": "https://github.com/yukangZhuu/ofc_ml.git",
+    "commit": "c800c6efda1be848a7e746bcfa99236348de6c0d"
+  },
+  "email": "zhuyukang2000@gmail.com",
+  "root": "/Users/bytedance/Documents/ofc_ml",
+  "host": "CWDN2Y70WP",
+  "executable": "/opt/miniconda3/envs/ofc/bin/python",
+  "cpu_count": 12,
+  "cpu_count_logical": 12,
+  "disk": {
+    "/": {
+      "total": "494384795648",
+      "used": "365447954432"
+    }
+  },
+  "memory": {
+    "total": "34359738368"
+  },
+  "apple": {
+    "name": "Apple M2 Pro",
+    "ecpuCores": 4,
+    "pcpuCores": 8,
+    "gpuCores": 19,
+    "memoryGb": 32,
+    "swapTotalBytes": "12884901888",
+    "ramTotalBytes": "34359738368"
+  },
+  "writerId": "g5oez155i5dr6crv904repmih9k11vxw"
+}
