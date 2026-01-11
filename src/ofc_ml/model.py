@@ -10,9 +10,6 @@ from .config import RANDOM_STATE, TEST_SIZE
 from .network import GainPredictor, OFCDataset
 
 class PyTorchModelWrapper:
-    """
-    Wrapper to make PyTorch model behave like sklearn estimator for consistency.
-    """
     def __init__(self, model, device):
         self.model = model
         self.device = device
@@ -26,51 +23,65 @@ class PyTorchModelWrapper:
             preds = self.model(tensor_X)
             return preds.cpu().numpy()
 
-def train_model(X_train, y_train):
-    """
-    Train a Neural Network model.
+def train_model(X_train, y_train, preprocessor):
+    print("Training CNN-based Neural Network model...")
     
-    Returns:
-        model: PyTorchModelWrapper.
-        metrics: Dictionary of validation metrics.
-    """
-    print("Training Neural Network model...")
-    
-    # Device config
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
-    # Split for validation
     X_tr, X_val, y_tr, y_val = train_test_split(
         X_train, y_train, test_size=TEST_SIZE, random_state=RANDOM_STATE
     )
     
-    # Create Datasets and Loaders
     train_dataset = OFCDataset(X_tr, y_tr)
     val_dataset = OFCDataset(X_val, y_val)
     
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False)
     
-    # Initialize Model
     input_dim = X_train.shape[1]
     output_dim = y_train.shape[1]
-    model = GainPredictor(input_dim, output_dim).to(device)
     
-    # Training Config
+    num_spectral = 95
+    num_scalar = 4
+    num_mask = 95
+    
+    cat_transformer = preprocessor.named_transformers_['cat']
+    if cat_transformer is not None:
+        num_cat = cat_transformer.get_feature_names_out().shape[0]
+    else:
+        num_cat = 0
+    
+    print(f"Model architecture:")
+    print(f"  - Input dimension: {input_dim}")
+    print(f"  - Output dimension: {output_dim}")
+    print(f"  - Scalar features: {num_scalar}")
+    print(f"  - Spectral features: {num_spectral}")
+    print(f"  - Categorical features (after one-hot): {num_cat}")
+    print(f"  - Mask features: {num_mask}")
+    
+    model = GainPredictor(
+        input_dim=input_dim, 
+        output_dim=output_dim,
+        num_spectral=num_spectral,
+        num_scalar=num_scalar,
+        num_cat=num_cat,
+        num_mask=num_mask
+    ).to(device)
+    
     criterion = nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)
-    # verbose deprecated in recent torch versions or behavior changed, removing it for safety
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10)
+    optimizer = optim.AdamW(model.parameters(), lr=0.0005, weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        optimizer, T_0=20, T_mult=2, eta_min=1e-6
+    )
     
-    epochs = 200
+    epochs = 300
     best_val_loss = float('inf')
     best_model_state = None
-    patience = 20
+    patience = 30
     patience_counter = 0
     
     for epoch in range(epochs):
-        # Train
         model.train()
         train_loss = 0.0
         for inputs, targets in train_loader:
@@ -80,13 +91,15 @@ def train_model(X_train, y_train):
             outputs = model(inputs)
             loss = criterion(outputs, targets)
             loss.backward()
+            
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            
             optimizer.step()
             
             train_loss += loss.item() * inputs.size(0)
             
         train_loss /= len(train_dataset)
         
-        # Validate
         model.eval()
         val_loss = 0.0
         with torch.no_grad():
@@ -98,14 +111,11 @@ def train_model(X_train, y_train):
         
         val_loss /= len(val_dataset)
         
-        # Scheduler step
-        scheduler.step(val_loss)
+        scheduler.step()
         
-        # Logging
-        if (epoch + 1) % 10 == 0:
-            print(f"Epoch {epoch+1}/{epochs} - Train Loss: {train_loss:.4f} - Val Loss: {val_loss:.4f}")
+        if (epoch + 1) % 20 == 0:
+            print(f"Epoch {epoch+1}/{epochs} - Train Loss: {train_loss:.6f} - Val Loss: {val_loss:.6f}")
             
-        # Early Stopping
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             best_model_state = model.state_dict()
@@ -116,19 +126,19 @@ def train_model(X_train, y_train):
                 print(f"Early stopping at epoch {epoch+1}")
                 break
     
-    # Load best model
     if best_model_state:
         model.load_state_dict(best_model_state)
         
-    # Final Validation Metrics
     wrapper = PyTorchModelWrapper(model, device)
     y_pred = wrapper.predict(X_val)
     
     mse = mean_squared_error(y_val, y_pred)
     mae = mean_absolute_error(y_val, y_pred)
+    rmse = np.sqrt(mse)
     
-    print(f"Final Validation MSE: {mse:.4f}")
-    print(f"Final Validation MAE: {mae:.4f}")
+    print(f"Final Validation MSE: {mse:.6f}")
+    print(f"Final Validation RMSE: {rmse:.6f}")
+    print(f"Final Validation MAE: {mae:.6f}")
     
-    metrics = {"mse": mse, "mae": mae}
+    metrics = {"mse": mse, "mae": mae, "rmse": rmse}
     return wrapper, metrics
