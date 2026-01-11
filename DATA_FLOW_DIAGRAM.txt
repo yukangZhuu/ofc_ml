@@ -20,7 +20,7 @@ SAMPLE INPUT (Single Sample)
                              │
                              ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│  PROCESSED FEATURES (197 total)                                             │
+│  PROCESSED FEATURES (207 total)                                             │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
 │  │ Spectral (95): Standardized z-scores                                │    │
 │  │ Scalar (4): Standardized z-scores                                   │    │
@@ -29,261 +29,354 @@ SAMPLE INPUT (Single Sample)
 │  └─────────────────────────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────────────────────────┘
                             │
-              ┌─────────────┴─────────────┐
-              │                           │
-              ▼                           ▼
-┌──────────────────────────┐  ┌──────────────────────────┐
-│   SPECTRAL BRANCH        │  │   SCALAR BRANCH          │
-│                          │  │                          │
-│ Input: (95)              │  │ Input: (~105-108)        │
-│                          │  │                          │
-│ ┌──────────────────────┐ │  │ ┌──────────────────────┐ │
-│ │ Reshape to (1,95)    │ │  │ │ Linear: ~105→256     │ │
-│ └──────────┬───────────┘ │  │ │ BN + ReLU + Drop(0.3)│ │
-│            │             │  │ └──────────┬───────────┘ │
-│            ▼             │  │            │             │
-│ ┌──────────────────────┐ │  │            ▼             │
-│ │ Conv1d: 1→32, k=7    │ │  │ ┌──────────────────────┐ │
-│ │ Output: (32,95)      │ │  │ │ Linear: 256→128      │ │
-│ │ BN + ReLU + Drop(0.2)│ │  │ │ BN + ReLU + Drop(0.3)│ │
-│ └──────────┬───────────┘ │  │ └──────────┬───────────┘ │
-│            │             │  │            │             │
-│            ▼             │  │            ▼             │
-│ ┌──────────────────────┐ │  │ Output: (128)            │
-│ │ Conv1d: 32→64, k=5   │ │  │                          │
-│ │ Output: (64,95)      │ │  │                          │
-│ │ BN + ReLU + Drop(0.2)│ │  │                          │
-│ └──────────┬───────────┘ │  │                          │
-│            │             │  │                          │
-│            ▼             │  │                          │
-│ ┌──────────────────────┐ │  │                          │
-│ │ Conv1d: 64→128, k=3  │ │  │                          │
-│ │ Output: (128,95)     │ │  │                          │
-│ │ BN + ReLU + Drop(0.2)│ │  │                          │
-│ └──────────┬───────────┘ │  │                          │
-│            │             │  │                          │
-│            ▼             │  │                          │
-│ ┌──────────────────────┐ │  │                          │
-│ │ Conv1d: 128→128, k=3 │ │  │                          │
-│ │ Output: (128,95)     │ │  │                          │
-│ │ BN + ReLU + Drop(0.2)│ │  │                          │
-│ └──────────┬───────────┘ │  │                          │
-│            │             │  │                          │
-│            ▼             │  │                          │
-│ ┌──────────────────────┐ │  │                          │
-│ │ Squeeze: (128)       │ │  │                          │
-│ └──────────┬───────────┘ │  │                          │
-│            │             │  │                          │
-│            ▼             │  │                          │
-│ ┌──────────────────────┐ │  │                          │
-│ │ Spectral Attn:       │ │  │                          │
-│ │ 128→32→128           │ │  │                          │
-│ │ Sigmoid gating       │ │  │                          │
-│ └──────────┬───────────┘ │  │                          │
-│            │             │  │                          │
-│            ▼             │  │                          │
-│ ┌──────────────────────┐ │  │                          │
-│ │ Multi-Head Attn:     │ │  │                          │
-│ │ 4 heads, d=32        │ │  │                          │
-│ │ Global context       │ │  │                          │
-│ └──────────┬───────────┘ │  │                          │
-│            │             │  │                          │
-│            ▼             │  │                          │
-│      Output: (128)       │  │      Output: (128)       │
-└────────────┬─────────────┘  └────────────┬─────────────┘
-             │                             │
-             └───────────┬─────────────────┘
-                         ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│                     CROSS-MODAL FUSION                                 │
-│                                                                        │
-│ Spectral (128) ──┐                                                     │
-│                  │                                                     │
-│                  ▼                                                     │
-│          ┌────────────────┐                                            │
-│          │ Linear: 128→256│                                            │
-│          └───────┬────────┘                                            │
-│                  │                                                     │
-│                  ▼                                                     │
-│ Scalar (128) ────┼──┐                                                  │
-│                  │  │                                                  │
-│                  ▼  ▼                                                  │
-│          ┌────────────────┐                                            │
-│          │ Linear: 128→256│                                            │
-│          └───────┬────────┘                                            │
-│                  │                                                     │
-│                  ▼                                                     │
-│          ┌───────────────┐                                             │
-│          │ Concat: 512   │                                             │
-│          └───────┬───────┘                                             │
-│                  │                                                     │
-│                  ▼                                                     │
-│          ┌────────────────┐                                            │
-│          │ Linear: 512→256│                                            │
-│          │ BN+ReLU+Drop   │                                            │
-│          └───────┬────────┘                                            │
-│                  │                                                     │
-│                  ▼                                                     │
-│          ┌───────────────┐                                             │
-│          │ Cross-Attn:   │                                             │
-│          │ 4 heads, d=64 │                                             │
-│          │ Residual +    │                                             │
-│          └───────┬───────┘                                             │
-│                  │                                                     │
-│                  ▼                                                     │
-│          Output: (256)                                                 │
-└────────────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
+                            ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                         DECODER                                             │
+│                         INPUT LAYER                                       │
 │                                                                             │
-│ Input: (256)                                                                │
-│       │                                                                     │
-│       ▼                                                                     │
-│ ┌──────────────────────┐                                                    │
-│ │ Linear: 256→256      │                                                    │
-│ │ BN + ReLU + Drop(0.3)│                                                    │
-│ └──────────┬───────────┘                                                    │
-│            │                                                                │
-│            ▼                                                                │
-│ ┌──────────────────────┐                                                    │
-│ │ Linear: 256→128      │                                                    │
-│ │ BN + ReLU + Drop(0.2)│                                                    │
-│ └──────────┬───────────┘                                                    │
-│            │                                                                │
-│            ▼                                                                │
-│ ┌──────────────────────┐                                                    │
-│ │ Linear: 128→95       │                                                    │
-│ │ No Activation        │                                                    │
-│ └──────────┬───────────┘                                                    │
-│            │                                                                │
-│            ▼                                                                │
-│      Output: (95)                                                           │
+│  Input: (B, 207)                                                           │
+│         │                                                                     │
+│         ▼                                                                     │
+│  ┌─────────────────────────────────┐                                          │
+│  │  Linear Layer                 │                                          │
+│  │  (207 → 256)                │                                          │
+│  │  Xavier Initialization       │                                          │
+│  └────────┬────────────────────────┘                                          │
+│           │                                                             │
+│           ▼                                                             │
+│  ┌─────────────────────────────────┐                                          │
+│  │  Batch Normalization          │                                          │
+│  │  (256 features)               │                                          │
+│  │  Mean=1.0, Std=0.0         │                                          │
+│  └────────┬────────────────────────┘                                          │
+│           │                                                             │
+│           ▼                                                             │
+│  ┌─────────────────────────────────┐                                          │
+│  │  ReLU Activation            │                                          │
+│  │  max(0, x)                   │                                          │
+│  └────────┬────────────────────────┘                                          │
+│           │                                                             │
+│           ▼                                                             │
+│  ┌─────────────────────────────────┐                                          │
+│  │  Dropout                     │                                          │
+│  │  p=0.3 (30% dropout)        │                                          │
+│  │  Prevents overfitting        │                                          │
+│  └────────┬────────────────────────┘                                          │
+│           │                                                             │
+│           ▼                                                             │
+│  Output: (B, 256)                                                           │
 └─────────────────────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                    PREDICTED GAIN SPECTRUM                                  │
+│                         HIDDEN LAYER 2                                     │
 │                                                                             │
-│  [18.41, 18.41, 18.41, ..., 18.41]                                          │
+│  Input: (B, 256)                                                           │
+│         │                                                                     │
+│         ▼                                                                     │
+│  ┌─────────────────────────────────┐                                          │
+│  │  Linear Layer                 │                                          │
+│  │  (256 → 128)                │                                          │
+│  │  Xavier Initialization       │                                          │
+│  └────────┬────────────────────────┘                                          │
+│           │                                                             │
+│           ▼                                                             │
+│  ┌─────────────────────────────────┐                                          │
+│  │  Batch Normalization          │                                          │
+│  │  (128 features)               │                                          │
+│  │  Mean=1.0, Std=0.0         │                                          │
+│  └────────┬────────────────────────┘                                          │
+│           │                                                             │
+│           ▼                                                             │
+│  ┌─────────────────────────────────┐                                          │
+│  │  ReLU Activation            │                                          │
+│  │  max(0, x)                   │                                          │
+│  └────────┬────────────────────────┘                                          │
+│           │                                                             │
+│           ▼                                                             │
+│  ┌─────────────────────────────────┐                                          │
+│  │  Dropout                     │                                          │
+│  │  p=0.3 (30% dropout)        │                                          │
+│  │  Prevents overfitting        │                                          │
+│  └────────┬────────────────────────┘                                          │
+│           │                                                             │
+│           ▼                                                             │
+│  Output: (B, 128)                                                           │
+└─────────────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           OUTPUT LAYER                                     │
 │                                                                             │
-│  (95 frequency channels, gain values in dB)                                 │
+│  Input: (B, 128)                                                           │
+│         │                                                                     │
+│         ▼                                                                     │
+│  ┌─────────────────────────────────┐                                          │
+│  │  Linear Layer                 │                                          │
+│  │  (128 → 95)                 │                                          │
+│  │  Xavier Initialization       │                                          │
+│  └────────┬────────────────────────┘                                          │
+│           │                                                             │
+│           ▼                                                             │
+│  Output: (B, 95)                                                            │
+│                                                                              │
+│  No Activation (Regression Task)                                                │
+└─────────────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    PREDICTED GAIN SPECTRUM (NORMALIZED)                     │
+│                                                                             │
+│  Output: (B, 95)                                                             │
+│                                                                             │
+│  Values are normalized (mean=0, std=1) during training                        │
+│  Need denormalization for final prediction                                      │
+└─────────────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                   TARGET DENORMALIZATION                                     │
+│                                                                             │
+│  Formula: pred_original = pred_normalized × std + mean                           │
+│                                                                             │
+│  Per-channel parameters:                                                       │
+│  - Mean: ~4.21 dB (varies by channel)                                      │
+│  - Std: ~7.81 dB (varies by channel)                                       │
+│                                                                             │
+│  Result: Predictions in original scale (-13.5 to 20.2 dB)                  │
+└─────────────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    PREDICTED GAIN SPECTRUM (ORIGINAL SCALE)                 │
+│                                                                             │
+│  Output: (B, 95)                                                             │
+│                                                                             │
+│  [18.41, 18.41, 18.41, ..., 18.41] (example)                             │
+│                                                                             │
+│  Values in dB, matching training data range                                    │
+│  Non-masked channels: ~17-18 dB (typical EDFA gain)                       │
+│  Masked channels: Will be zeroed out by mask constraint                    │
+└─────────────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                      MASK CONSTRAINT APPLICATION                              │
+│                                                                             │
+│  Formula: final_pred = pred × mask                                           │
+│                                                                             │
+│  Where:                                                                      │
+│  - pred: Model predictions (B, 95)                                          │
+│  - mask: Binary mask (B, 95) from features                                   │
+│  - final_pred: Masked predictions for submission                                 │
+│                                                                             │
+│  Effect:                                                                     │
+│  - Unmasked channels (mask=1): Keep predicted gain value                        │
+│  - Masked channels (mask=0): Set to 0.0                                      │
+└─────────────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                       FINAL SUBMISSION OUTPUT                                │
+│                                                                             │
+│  Format: CSV with ID + 95 gain columns                                       │
+│                                                                             │
+│  Example row:                                                                │
+│  ID,calculated_gain_spectra_00,...,calculated_gain_spectra_94                │
+│  1,0.0,0.0,...,15.33,0.0,...,0.0                                      │
+│                                                                             │
+│  - Masked channels: 0.0                                                       │
+│  - Unmasked channels: Predicted gain values (13-20 dB)                        │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Key Processing Steps
 
-### 1. Spectral Feature Processing
-- **Input**: 95 frequency bins representing input power spectrum
-- **CNN Operations**: 
-  - Layer 1 (k=7): Captures broad spectral trends
-  - Layer 2 (k=5): Captures medium-scale patterns
-  - Layer 3 (k=3): Captures fine-grained details
-  - Layer 4 (k=3): Refines features
-- **Attention Mechanisms**:
-  - Spectral Attention: Learns which frequency channels are important
-  - Multi-Head Attention: Captures relationships between all channels
+### 1. Feature Preprocessing
+- **Spectral Features (95)**: Input power spectrum, standardized to z-scores
+- **Scalar Features (4)**: EDFA configuration parameters, standardized
+- **Categorical Features (3)**: One-hot encoded (~6-9 dimensions)
+- **Mask Features (95)**: Binary activation patterns, passed through unchanged
 
-### 2. Scalar Feature Processing
-- **Input**: Configuration parameters (gain, tilt, power) + categorical + mask
-- **MLP Operations**:
-  - Layer 1: Expands to 256 dimensions, learns complex combinations
-  - Layer 2: Compresses to 128 dimensions, refines representations
-- **Purpose**: Captures EDFA configuration effects on gain
+### 2. Neural Network Forward Pass
+- **Input Layer**: 207 → 256 dimensions
+  - Linear transformation with Xavier initialization
+  - Batch normalization for stable training
+  - ReLU activation for non-linearity
+  - Dropout (0.3) for regularization
 
-### 3. Cross-Modal Fusion
-- **Purpose**: Combines spectral and scalar information
-- **Operations**:
-  - Projection: Both branches projected to 256 dimensions
-  - Concatenation: Creates joint 512-dim representation
-  - Fusion MLP: Learns interactions between modalities
-  - Cross-Attention: Allows features to attend to each other
-- **Output**: Integrated 256-dim representation
+- **Hidden Layer 2**: 256 → 128 dimensions
+  - Linear transformation with Xavier initialization
+  - Batch normalization for stable training
+  - ReLU activation for non-linearity
+  - Dropout (0.3) for regularization
 
-### 4. Decoding
-- **Purpose**: Maps fused representation to gain spectrum
-- **Operations**:
-  - Layer 1: Maintains 256 dims, transforms for prediction
-  - Layer 2: Reduces to 128 dims, refines predictions
-  - Output: 95 gain values (one per frequency channel)
+- **Output Layer**: 128 → 95 dimensions
+  - Linear transformation with Xavier initialization
+  - No activation (regression task)
+  - Outputs normalized gain predictions
+
+### 3. Target Normalization (During Training)
+- **Purpose**: Stabilize training by normalizing target values
+- **Method**: Per-channel standardization
+  - mean = 4.21 dB (average across all channels)
+  - std = 7.81 dB (average across all channels)
+- **Application**: Applied to training labels before loss computation
+- **Reversal**: Applied to predictions after model output
+
+### 4. Masked Loss Function
+- **Purpose**: Focus learning on unmasked channels only
+- **Formula**: MaskedMSE = Σ((pred - target)² × mask) / Σ(mask)
+- **Why Critical**: Training data has 75.9% zeros (masked channels)
+  - Standard MSE would be dominated by zeros
+  - Model would learn to predict values near zero
+  - Masked loss ensures learning on actual gain values (17-18 dB)
+
+### 5. Prediction Denormalization
+- **Purpose**: Convert normalized predictions back to original scale
+- **Formula**: pred_original = pred_normalized × std + mean
+- **Result**: Predictions in dB range (-13.5 to 20.2)
+
+### 6. Mask Application (Submission)
+- **Purpose**: Zero out predictions for masked channels
+- **Formula**: final_pred = pred × mask
+- **Effect**: 
+  - Unmasked channels: Keep predicted gain (13-20 dB)
+  - Masked channels: Set to 0.0
 
 ## Parameter Count Estimation
 
 ```
-Spectral Branch:
-  Conv1d layers: 4
-    - Layer 1: 1×7×32 + 32 = 256
-    - Layer 2: 32×5×64 + 64 = 10,304
-    - Layer 3: 64×3×128 + 128 = 61,696
-    - Layer 4: 128×3×128 + 128 = 147,584
-  Spectral Attention: 128×32 + 32×128 = 8,192
-  Multi-Head Attention: 128×384 + 128×128 = 65,536
-  Total: ~293,568
+SimpleGainPredictor:
+  Hidden Layer 1: 207×256 + 256 = 53,248
+  Hidden Layer 2: 256×128 + 128 = 32,896
+  Output Layer: 128×95 + 95 = 12,255
+  Total: 99,167
 
-Scalar Branch:
-  MLP Layer 1: ~105×256 + 256 = ~27,136
-  MLP Layer 2: 256×128 + 128 = 32,896
-  Total: ~60,032
+Parameter Efficiency: 202 parameters per training sample
+  (99,167 / 490 samples)
 
-Fusion Module:
-  Projections: 128×256 + 128×256 = 65,536
-  Fusion MLP: 512×256 + 256 = 131,328
-  Cross-Attention: 256×768 + 256×256 = 262,400
-  Total: ~459,264
-
-Decoder:
-  Layer 1: 256×256 + 256 = 65,792
-  Layer 2: 256×128 + 128 = 32,896
-  Output: 128×95 + 95 = 12,255
-  Total: ~110,943
-
-TOTAL PARAMETERS: ~923,807
+Comparison with old model:
+  Old model: 792,447 parameters (1,617 per sample)
+  New model: 99,167 parameters (202 per sample)
+  Reduction: 87.5% fewer parameters
 ```
 
 ## Training Configuration
 
 ```
-Optimizer: AdamW
-  - Learning Rate: 0.0005
-  - Weight Decay: 1e-4
+Optimizer: Adam
+  - Learning Rate: 0.001
+  - Weight Decay: 1e-5
   - Gradient Clipping: max_norm=1.0
 
-Scheduler: CosineAnnealingWarmRestarts
-  - T_0: 20 (initial restart period)
-  - T_mult: 2 (period multiplier)
-  - eta_min: 1e-6 (minimum learning rate)
+Scheduler: ReduceLROnPlateau
+  - Mode: min (monitor validation loss)
+  - Factor: 0.5 (reduce LR by half)
+  - Patience: 20 epochs
+  - Min LR: 1e-6
 
 Training:
-  - Epochs: 300 (with early stopping)
-  - Batch Size: 64
+  - Epochs: 200 (with early stopping)
+  - Batch Size: 32
   - Validation Split: 20%
-  - Patience: 30 epochs
-  - Loss: MSE (Mean Squared Error)
+  - Early Stopping Patience: 50 epochs
+  - Loss: MaskedMSE (only on unmasked channels)
 
 Regularization:
-  - Dropout: 0.2-0.3 throughout
-  - Batch Normalization: All linear/conv layers
-  - Weight Decay: 1e-4
+  - Dropout: 0.3 on all hidden layers
+  - Batch Normalization: All linear layers
+  - Weight Decay: 1e-5
   - Gradient Clipping: 1.0
+  - Early Stopping: 50 epochs
+
+Target Normalization:
+  - Per-channel standardization
+  - Mean: ~4.21 dB, Std: ~7.81 dB
+  - Applied during training, reversed for prediction
 ```
 
 ## Key Design Decisions
 
-1. **Dual-Branch Architecture**: Separates spectral and scalar processing for better feature extraction
+1. **Simple MLP Architecture**: 
+   - Chosen over complex CNN due to small dataset (490 samples)
+   - Avoids over-parameterization (87.5% fewer parameters than old model)
 
-2. **Multi-Scale CNN**: Different kernel sizes (7, 5, 3) capture patterns at different frequency scales
+2. **Progressive Dimensionality Reduction**:
+   - Input (207) → Hidden 1 (256) → Hidden 2 (128) → Output (95)
+   - Expansion then compression helps learn complex patterns
+   - Final reduction prevents overfitting
 
-3. **Attention Mechanisms**: 
-   - Spectral attention provides interpretability
-   - Multi-head attention captures global context
+3. **Batch Normalization**:
+   - Stabilizes training by normalizing layer inputs
+   - Allows higher learning rates
+   - Reduces internal covariate shift
 
-4. **Cross-Modal Fusion**: Allows interaction between spectral and scalar features
+4. **ReLU Activation**:
+   - Non-linear, computationally efficient
+   - Helps with vanishing gradient problem
+   - Sparse activations (natural regularization)
 
-5. **Progressive Dimensionality**: 
-   - CNN expands channels (1→32→64→128)
-   - MLP expands then compresses (105→256→128)
-   - Fusion maintains 256 dims
-   - Decoder compresses to output (256→128→95)
+5. **Dropout (0.3)**:
+   - Critical for small dataset
+   - Randomly drops 30% of neurons during training
+   - Prevents co-adaptation of features
 
-6. **Strong Regularization**: Critical for small dataset (490 samples)
+6. **Masked Loss Function**:
+   - Most critical design decision for this problem
+   - Ensures model learns to predict actual gain values
+   - Prevents model from being dominated by masked channels
+
+7. **Target Normalization**:
+   - Stabilizes training by normalizing target values
+   - Allows model to learn from normalized targets
+   - Reversed for final predictions
+
+## Data Flow Summary
+
+```
+Raw Features (207)
+    ↓
+Preprocessing (StandardScaler + OneHotEncoder)
+    ↓
+Normalized Features (207)
+    ↓
+Input Layer (207 → 256)
+    ↓
+Hidden Layer 1 (256 → 128)
+    ↓
+Output Layer (128 → 95)
+    ↓
+Normalized Predictions (95)
+    ↓
+Denormalization (×std + mean)
+    ↓
+Original Scale Predictions (95)
+    ↓
+Mask Application (×mask)
+    ↓
+Final Submission (95 gain values)
+```
+
+## Performance Metrics
+
+```
+Validation Metrics (on unmasked channels only):
+  - MSE: 1.141
+  - RMSE: 1.068
+  - MAE: 0.442
+
+Prediction Statistics (non-zero only):
+  - Mean: 17.38 dB
+  - Std: 3.48 dB
+  - Min: -8.86 dB
+  - Max: 19.38 dB
+  - Count: 1,696 predictions
+
+Training Data Statistics (non-zero only):
+  - Mean: 17.47 dB
+  - Std: 4.83 dB
+  - Min: -13.50 dB
+  - Max: 20.20 dB
+
+Comparison: Model predictions closely match training data statistics
+```

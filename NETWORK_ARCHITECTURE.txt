@@ -1,10 +1,10 @@
-# GainPredictor Network Architecture
+# SimpleGainPredictor Network Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────────┐
 │                              INPUT LAYER                                        │
 │  ┌──────────────────────────────────────────────────────────────────────────────┐  │
-│  │  Features (197 total)                                                     │  │
+│  │  Features (207 total)                                                     │  │
 │  │  ┌─────────────┐ ┌─────────────┐ ┌──────────────┐ ┌─────────────┐        │  │
 │  │  │ Spectral    │ │   Scalar    │ │ Categorical  │ │    Mask     │        │  │
 │  │  │   (95)      │ │    (4)      │ │   (~6-9)     │ │    (95)     │        │  │
@@ -12,166 +12,212 @@
 │  └──────────────────────────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────────────────────┘
                                         │
-                    ┌───────────────────┴───────────────────┐
-                    │                                       │
-                    ▼                                       ▼
-┌──────────────────────────────────────┐    ┌──────────────────────────────────────┐
-│         SPECTRAL BRANCH              │    │         SCALAR BRANCH               │
-│                                      │    │                                      │
-│  Input: (B, 95)                      │    │  Input: (B, ~105-108)              │
-│         │                             │    │         │                             │
-│         ▼                             │    │         ▼                             │
-│  ┌─────────────────┐                  │    │  ┌─────────────────┐                │
-│  │  Reshape       │                  │    │  │  Linear Layer 1 │                │
-│  │  (B,1,95)      │                  │    │  │  (~105→256)     │                │
-│  └────────┬────────┘                  │    │  └────────┬────────┘                │
-│           │                             │    │           │                         │
-│           ▼                             │    │           ▼                         │
-│  ┌─────────────────────────────────┐   │    │  ┌─────────────────┐                │
-│  │  CONV BLOCK 1                  │   │    │  │  Linear Layer 2 │                │
-│  │  Conv1d(1→32, k=7, p=3)       │   │    │  │  (256→128)      │                │
-│  │  BatchNorm + ReLU + Dropout(0.2)│   │    │  └────────┬────────┘                │
-│  │  Output: (B,32,95)            │   │    │           │                         │
-│  └────────┬────────────────────────┘   │    │           ▼                         │
-│           │                             │    │  Output: (B, 128)                  │
-│           ▼                             │    │                                      │
-│  ┌─────────────────────────────────┐   │    └──────────────────────────────────────┘
-│  │  CONV BLOCK 2                  │   │
-│  │  Conv1d(32→64, k=5, p=2)      │   │
-│  │  BatchNorm + ReLU + Dropout(0.2)│   │
-│  │  Output: (B,64,95)            │   │
-│  └────────┬────────────────────────┘   │
-│           │                             │
-│           ▼                             │
-│  ┌─────────────────────────────────┐   │
-│  │  CONV BLOCK 3                  │   │
-│  │  Conv1d(64→128, k=3, p=1)     │   │
-│  │  BatchNorm + ReLU + Dropout(0.2)│   │
-│  │  Output: (B,128,95)           │   │
-│  └────────┬────────────────────────┘   │
-│           │                             │
-│           ▼                             │
-│  ┌─────────────────────────────────┐   │
-│  │  CONV BLOCK 4                  │   │
-│  │  Conv1d(128→128, k=3, p=1)    │   │
-│  │  BatchNorm + ReLU + Dropout(0.2)│   │
-│  │  Output: (B,128,95)           │   │
-│  └────────┬────────────────────────┘   │
-│           │                             │
-│           ▼                             │
-│  ┌─────────────────┐                  │
-│  │  Squeeze        │                  │
-│  │  (B,128)        │                  │
-│  └────────┬────────┘                  │
-│           │                             │
-│           ▼                             │
-│  ┌─────────────────────────────────┐   │
-│  │  SPECTRAL ATTENTION            │   │
-│  │  Linear(128→32→128)           │   │
-│  │  Sigmoid Activation            │   │
-│  │  Output: (B,128)              │   │
-│  └────────┬────────────────────────┘   │
-│           │                             │
-│           ▼                             │
-│  ┌─────────────────────────────────┐   │
-│  │  MULTI-HEAD SELF-ATTENTION     │   │
-│  │  4 Heads, d=32 each           │   │
-│  │  Output: (B,128)              │   │
-│  └────────┬────────────────────────┘   │
-│           │                             │
-│           ▼                             │
-│  Output: (B, 128)                      │
-└───────────────────────────────────────────┘
-                    │
-                    ▼
+                                        ▼
 ┌─────────────────────────────────────────────────────────────────────────────────────┐
-│                         CROSS-MODAL FUSION MODULE                                │
+│                         HIDDEN LAYER 1                                       │
 │                                                                              │
-│  Spectral: (B,128) ──┐                                                      │
-│                      │                                                      │
-│                      ▼                                                      │
-│              ┌───────────────┐                                               │
-│              │  Projection   │                                               │
-│              │  (128→256)    │                                               │
-│              └───────┬───────┘                                               │
-│                      │                                                      │
-│                      ▼                                                      │
-│  Scalar: (B,128) ───┼──┐                                                   │
-│                      │  │                                                   │
-│                      ▼  ▼                                                   │
-│              ┌───────────────┐                                               │
-│              │  Projection   │                                               │
-│              │  (128→256)    │                                               │
-│              └───────┬───────┘                                               │
-│                      │                                                      │
-│                      ▼                                                      │
-│              ┌───────────────┐                                               │
-│              │ Concatenation │                                               │
-│              │ (256+256=512) │                                               │
-│              └───────┬───────┘                                               │
-│                      │                                                      │
-│                      ▼                                                      │
-│              ┌───────────────┐                                               │
-│              │  Fusion MLP   │                                               │
-│              │  (512→256)    │                                               │
-│              │  BN+ReLU+Drop │                                               │
-│              └───────┬───────┘                                               │
-│                      │                                                      │
-│                      ▼                                                      │
-│              ┌───────────────┐                                               │
-│              │ Cross-Attn   │                                               │
-│              │ 4 Heads, d=64│                                               │
-│              │ Residual +   │                                               │
-│              └───────┬───────┘                                               │
-│                      │                                                      │
-│                      ▼                                                      │
-│              Output: (B, 256)                                                 │
+│  Input: (B, 207)                                                            │
+│         │                                                                     │
+│         ▼                                                                     │
+│  ┌─────────────────────────────────┐                                          │
+│  │  Linear Layer                 │                                          │
+│  │  (207 → 256)                │                                          │
+│  │  Xavier Initialization       │                                          │
+│  └────────┬────────────────────────┘                                          │
+│           │                                                             │
+│           ▼                                                             │
+│  ┌─────────────────────────────────┐                                          │
+│  │  Batch Normalization          │                                          │
+│  │  (256 features)               │                                          │
+│  │  Mean=1.0, Std=0.0         │                                          │
+│  └────────┬────────────────────────┘                                          │
+│           │                                                             │
+│           ▼                                                             │
+│  ┌─────────────────────────────────┐                                          │
+│  │  ReLU Activation            │                                          │
+│  │  max(0, x)                   │                                          │
+│  └────────┬────────────────────────┘                                          │
+│           │                                                             │
+│           ▼                                                             │
+│  ┌─────────────────────────────────┐                                          │
+│  │  Dropout                     │                                          │
+│  │  p=0.3 (30% dropout)        │                                          │
+│  │  Prevents overfitting        │                                          │
+│  └────────┬────────────────────────┘                                          │
+│           │                                                             │
+│           ▼                                                             │
+│  Output: (B, 256)                                                           │
 └─────────────────────────────────────────────────────────────────────────────────────┘
                                         │
                                         ▼
 ┌─────────────────────────────────────────────────────────────────────────────────────┐
-│                              DECODER MODULE                                     │
+│                         HIDDEN LAYER 2                                       │
 │                                                                              │
-│  Input: (B, 256)                                                             │
+│  Input: (B, 256)                                                            │
 │         │                                                                     │
 │         ▼                                                                     │
 │  ┌─────────────────────────────────┐                                          │
-│  │  Decoder Layer 1               │                                          │
-│  │  Linear(256→256)               │                                          │
-│  │  BN + ReLU + Dropout(0.3)      │                                          │
-│  │  Output: (B,256)               │                                          │
+│  │  Linear Layer                 │                                          │
+│  │  (256 → 128)                │                                          │
+│  │  Xavier Initialization       │                                          │
 │  └────────┬────────────────────────┘                                          │
 │           │                                                             │
 │           ▼                                                             │
 │  ┌─────────────────────────────────┐                                          │
-│  │  Decoder Layer 2               │                                          │
-│  │  Linear(256→128)               │                                          │
-│  │  BN + ReLU + Dropout(0.2)      │                                          │
-│  │  Output: (B,128)               │                                          │
+│  │  Batch Normalization          │                                          │
+│  │  (128 features)               │                                          │
+│  │  Mean=1.0, Std=0.0         │                                          │
 │  └────────┬────────────────────────┘                                          │
 │           │                                                             │
 │           ▼                                                             │
 │  ┌─────────────────────────────────┐                                          │
-│  │  Output Layer                  │                                          │
-│  │  Linear(128→95)                │                                          │
-│  │  No Activation (Regression)     │                                          │
-│  │  Output: (B,95)                │                                          │
+│  │  ReLU Activation            │                                          │
+│  │  max(0, x)                   │                                          │
 │  └────────┬────────────────────────┘                                          │
 │           │                                                             │
 │           ▼                                                             │
-│  Output: Predicted Gain Spectrum (95 channels)                                 │
+│  ┌─────────────────────────────────┐                                          │
+│  │  Dropout                     │                                          │
+│  │  p=0.3 (30% dropout)        │                                          │
+│  │  Prevents overfitting        │                                          │
+│  └────────┬────────────────────────┘                                          │
+│           │                                                             │
+│           ▼                                                             │
+│  Output: (B, 128)                                                           │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+                                        │
+                                        ▼
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                           OUTPUT LAYER                                       │
+│                                                                              │
+│  Input: (B, 128)                                                            │
+│         │                                                                     │
+│         ▼                                                                     │
+│  ┌─────────────────────────────────┐                                          │
+│  │  Linear Layer                 │                                          │
+│  │  (128 → 95)                 │                                          │
+│  │  Xavier Initialization       │                                          │
+│  └────────┬────────────────────────┘                                          │
+│           │                                                             │
+│           ▼                                                             │
+│  Output: (B, 95)                                                            │
+│                                                                              │
+│  No Activation (Regression Task)                                                │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+                                        │
+                                        ▼
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                    PREDICTED GAIN SPECTRUM                                   │
+│                                                                              │
+│  Output: (B, 95)                                                             │
+│                                                                              │
+│  Each of 95 values represents predicted gain (dB) at a specific frequency channel  │
+│                                                                              │
+│  Values are normalized during training and denormalized for prediction             │
 └─────────────────────────────────────────────────────────────────────────────────────┘
 
 Legend:
 ┌─────────────────────────────────────────────────────────────────────────────────────┐
 │  B = Batch Size                                                               │
-│  Conv1d = 1D Convolution                                                      │
+│  Linear = Fully Connected Layer                                                │
 │  BN = Batch Normalization                                                       │
 │  ReLU = Rectified Linear Unit                                                  │
-│  Drop = Dropout                                                                │
-│  Linear = Fully Connected Layer                                                │
-│  MLP = Multi-Layer Perceptron                                                  │
-│  k = Kernel Size                                                              │
-│  p = Padding                                                                  │
-│  d = Head Dimension                                                           │
+│  Dropout = Random neuron deactivation for regularization                              │
+│  p = Dropout probability                                                       │
+│  Xavier = Weight initialization: sqrt(6 / (fan_in + fan_out))                      │
 └─────────────────────────────────────────────────────────────────────────────────────┘
+
+## Architecture Summary
+
+```
+Total Parameters: 99,167
+├─ Hidden Layer 1: 207×256 + 256 = 53,248
+├─ Hidden Layer 2: 256×128 + 128 = 32,896
+└─ Output Layer: 128×95 + 95 = 12,255
+
+Parameter Efficiency: 202 parameters per training sample (99,167 / 490 samples)
+```
+
+## Key Design Decisions
+
+1. **Simple MLP Architecture**: 
+   - Chosen over complex CNN due to small dataset (490 samples)
+   - Avoids over-parameterization (old model: 792K params vs new: 99K params)
+
+2. **Two Hidden Layers**:
+   - Layer 1 (256): Expands features, learns complex combinations
+   - Layer 2 (128): Compresses representation, refines predictions
+   - Progressive reduction prevents overfitting
+
+3. **Batch Normalization**:
+   - Stabilizes training by normalizing layer inputs
+   - Allows higher learning rates
+   - Reduces internal covariate shift
+
+4. **ReLU Activation**:
+   - Non-linear, computationally efficient
+   - Helps with vanishing gradient problem
+   - Sparse activations (natural regularization)
+
+5. **Dropout (0.3)**:
+   - Critical for small dataset
+   - Randomly drops 30% of neurons during training
+   - Prevents co-adaptation of features
+
+6. **No Output Activation**:
+   - Regression task requires unbounded output
+   - Gain values can be negative (-13.5 to 20.2 dB)
+   - Model learns to predict raw normalized values
+
+## Training Configuration
+
+```
+Optimizer: Adam
+  - Learning Rate: 0.001
+  - Weight Decay: 1e-5
+  - Gradient Clipping: max_norm=1.0
+
+Scheduler: ReduceLROnPlateau
+  - Mode: min (monitor validation loss)
+  - Factor: 0.5 (reduce LR by half)
+  - Patience: 20 epochs
+  - Min LR: 1e-6
+
+Training:
+  - Epochs: 200 (with early stopping)
+  - Batch Size: 32
+  - Validation Split: 20%
+  - Early Stopping Patience: 50 epochs
+  - Loss: MaskedMSE (only on unmasked channels)
+
+Regularization:
+  - Dropout: 0.3 on all hidden layers
+  - Batch Normalization: All linear layers
+  - Weight Decay: 1e-5
+  - Gradient Clipping: 1.0
+  - Early Stopping: 50 epochs
+
+Target Normalization:
+  - Per-channel standardization
+  - Mean: ~4.21 dB, Std: ~7.81 dB
+  - Applied during training, reversed for prediction
+```
+
+## Masked Loss Function
+
+The model uses a masked MSE loss that only computes loss on unmasked channels:
+
+```
+MaskedMSE = Σ((pred - target)² × mask) / Σ(mask)
+
+Where:
+- pred: Model predictions (B, 95)
+- target: Ground truth labels (B, 95)
+- mask: Binary mask (B, 95) where 1=unmasked, 0=masked
+- Loss is computed only on channels where mask=1
+```
+
+This is critical because:
+- Training data contains 75.9% zeros (masked channels)
+- Standard MSE would be dominated by zeros
+- Masked loss focuses learning on actual gain values (17-18 dB)

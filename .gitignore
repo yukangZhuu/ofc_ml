@@ -15,10 +15,9 @@ venv/
 # VS Code
 .vscode/
 
-# Data
-data/
-*.zip
-*.csv
-
 # Output
+/submissions
 submission.csv
+
+# WandB
+wandb/
