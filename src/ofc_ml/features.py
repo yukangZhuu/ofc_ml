@@ -15,13 +15,12 @@ def get_feature_columns(df):
     
     return cat_cols, num_cols, spectra_cols, mask_cols
 
-def create_preprocessor(cat_cols, num_cols, spectra_cols, mask_cols):
+def create_preprocessor(num_cols, spectra_cols, cat_cols):
     preprocessor = ColumnTransformer(
         transformers=[
             ('spectra', StandardScaler(), spectra_cols),
             ('num', StandardScaler(), num_cols),
-            ('cat', OneHotEncoder(handle_unknown='ignore', sparse_output=False), cat_cols),
-            ('mask', 'passthrough', mask_cols)
+            ('cat', OneHotEncoder(handle_unknown='ignore', sparse_output=False), cat_cols)
         ],
         remainder='drop'
     )
@@ -32,7 +31,7 @@ def preprocess_features(train_df, test_df):
     
     cat_cols, num_cols, spectra_cols, mask_cols = get_feature_columns(train_df)
     
-    preprocessor = create_preprocessor(cat_cols, num_cols, spectra_cols, mask_cols)
+    preprocessor = create_preprocessor(num_cols, spectra_cols, cat_cols)
     
     X_train = preprocessor.fit_transform(train_df)
     
@@ -43,7 +42,6 @@ def preprocess_features(train_df, test_df):
     print(f"  - Spectral features: {len(spectra_cols)}")
     print(f"  - Scalar features (num): {len(num_cols)}")
     print(f"  - Categorical features: {len(cat_cols)}")
-    print(f"  - Mask features: {len(mask_cols)}")
     print(f"  - Total: {X_train.shape[1]}")
     
     print(f"Train shape: {X_train.shape}")

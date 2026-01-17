@@ -5,26 +5,43 @@ from torch.utils.data import DataLoader, Dataset
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 import numpy as np
-import wandb
+from pathlib import Path
 
-from .config import RANDOM_STATE, TEST_SIZE, WANDB_PROJECT, WANDB_ENTITY, WANDB_MODE
-from .network import SimpleGainPredictor, OFCDataset, TargetNormalizer
+from .config import RANDOM_STATE, TEST_SIZE, WANDB_PROJECT, WANDB_ENTITY, WANDB_MODE, DROPOUT, HIDDEN_DIMS, LEARNING_RATE, WEIGHT_DECAY, BATCH_SIZE, EARLY_STOPPING_PATIENCE
+from .network import SimpleGainPredictor, OFCDataset, TargetNormalizer, compute_baseline_gain
 
 class PyTorchModelWrapper:
-    def __init__(self, model, target_normalizer, device):
+    def __init__(self, model, device):
         self.model = model
-        self.target_normalizer = target_normalizer
         self.device = device
         self.model.to(self.device)
         self.model.eval()
         
-    def predict(self, X):
+    def predict(self, X, target_gain, target_gain_tilt, mask=None):
         self.model.eval()
         with torch.no_grad():
             tensor_X = torch.FloatTensor(X).to(self.device)
-            preds = self.model(tensor_X)
-            preds = preds.cpu().numpy()
-            preds = self.target_normalizer.inverse_transform(preds)
+            
+            if mask is not None:
+                tensor_mask = torch.FloatTensor(mask).to(self.device)
+                preds_offset = self.model(tensor_X, tensor_mask)
+            else:
+                preds_offset = self.model(tensor_X)
+            
+            preds_offset = preds_offset.cpu().numpy()
+            
+            # Compute baseline
+            baseline = np.array([
+                compute_baseline_gain(tg, tgt) 
+                for tg, tgt in zip(target_gain, target_gain_tilt)
+            ])
+            
+            # Final prediction: baseline + offset
+            preds = baseline + preds_offset
+            
+            if mask is not None:
+                preds = preds * mask
+            
             return preds
 
 class MaskedMSELoss(nn.Module):
@@ -38,42 +55,51 @@ class MaskedMSELoss(nn.Module):
         loss = masked_squared_diff.sum() / mask.sum()
         return loss
 
-class OFCDatasetWithMask(Dataset):
-    def __init__(self, X, y, masks):
-        self.X = torch.FloatTensor(X)
-        self.y = torch.FloatTensor(y)
-        self.masks = torch.FloatTensor(masks)
-        
-    def __len__(self):
-        return len(self.X)
-    
-    def __getitem__(self, idx):
-        return self.X[idx], self.y[idx], self.masks[idx]
-
 def train_model(X_train, y_train, preprocessor, train_features, mask_cols):
-    print("Training simplified Neural Network model...")
+    print("Training simplified Neural Network model with baseline+offset approach...")
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
-    target_normalizer = TargetNormalizer()
-    y_train_normalized = target_normalizer.fit_transform(y_train)
+    target_gain_values = train_features['target_gain'].values
+    target_gain_tilt_values = train_features['target_gain_tilt'].values
     
-    print(f"Target normalization:")
-    print(f"  Mean: {target_normalizer.mean.mean():.4f}")
-    print(f"  Std: {target_normalizer.std.mean():.4f}")
+    print(f"\nComputing baseline gains...")
+    baseline_gains = np.array([
+        compute_baseline_gain(tg, tgt) 
+        for tg, tgt in zip(target_gain_values, target_gain_tilt_values)
+    ])
+    
+    print(f"Baseline gain shape: {baseline_gains.shape}")
+    print(f"  Mean: {baseline_gains.mean():.4f}")
+    print(f"  Std: {baseline_gains.std():.4f}")
+    print(f"  Min: {baseline_gains.min():.4f}")
+    print(f"  Max: {baseline_gains.max():.4f}")
+    
+    print(f"\nComputing offset values (only for active channels)...")
+    train_masks_array = train_features[mask_cols].values
+    
+    offset_values = (y_train - baseline_gains) * train_masks_array
+    
+    print(f"Offset statistics:")
+    print(f"  Mean: {offset_values.mean():.6f}")
+    print(f"  Std: {offset_values.std():.6f}")
+    print(f"  Min: {offset_values.min():.6f}")
+    print(f"  Max: {offset_values.max():.6f}")
     
     train_masks = train_features[mask_cols].values
     
-    X_tr, X_val, y_tr, y_val, mask_tr, mask_val = train_test_split(
-        X_train, y_train_normalized, train_masks, test_size=TEST_SIZE, random_state=RANDOM_STATE
+    X_tr, X_val, y_tr, y_val, mask_tr, mask_val, tg_tr, tg_val, tgt_tr, tgt_val = train_test_split(
+        X_train, offset_values, train_masks, 
+        target_gain_values, target_gain_tilt_values,
+        test_size=TEST_SIZE, random_state=RANDOM_STATE
     )
     
-    train_dataset = OFCDatasetWithMask(X_tr, y_tr, mask_tr)
-    val_dataset = OFCDatasetWithMask(X_val, y_val, mask_val)
+    train_dataset = OFCDataset(X_tr, y_tr, tg_tr, tgt_tr, mask_tr)
+    val_dataset = OFCDataset(X_val, y_val, tg_val, tgt_val, mask_val)
     
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
     
     input_dim = X_train.shape[1]
     output_dim = y_train.shape[1]
@@ -81,66 +107,35 @@ def train_model(X_train, y_train, preprocessor, train_features, mask_cols):
     model = SimpleGainPredictor(
         input_dim=input_dim, 
         output_dim=output_dim,
-        hidden_dims=[256, 128],
-        dropout=0.3
+        hidden_dims=HIDDEN_DIMS,
+        dropout=DROPOUT
     ).to(device)
     
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Model parameters: {total_params:,}")
     
-    config = {
-        'learning_rate': 0.001,
-        'batch_size': 32,
-        'epochs': 200,
-        'optimizer': 'Adam',
-        'weight_decay': 1e-5,
-        'scheduler': 'ReduceLROnPlateau',
-        'patience': 20,
-        'factor': 0.5,
-        'min_lr': 1e-6,
-        'early_stopping_patience': 50,
-        'input_dim': input_dim,
-        'output_dim': output_dim,
-        'hidden_dims': [256, 128],
-        'dropout': 0.3,
-        'device': str(device),
-        'train_samples': len(X_train),
-        'val_samples': len(X_val),
-        'random_state': RANDOM_STATE,
-        'total_params': total_params
-    }
-    
-    wandb.init(
-        project=WANDB_PROJECT,
-        entity=WANDB_ENTITY,
-        mode=WANDB_MODE,
-        config=config,
-        name='simple-gain-predictor',
-        tags=['mlp', 'normalized', 'edfa']
-    )
-    
-    wandb.watch(model, log_freq=100, log_graph=True)
-    
     criterion = MaskedMSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)
+    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=20, min_lr=1e-6
+        optimizer, mode='min', factor=0.5, patience=15, min_lr=1e-6
     )
     
-    epochs = 200
+    epochs = 500
     best_val_loss = float('inf')
     best_model_state = None
-    patience = 50
+    patience = EARLY_STOPPING_PATIENCE
     patience_counter = 0
     
     for epoch in range(epochs):
         model.train()
         train_loss = 0.0
-        for inputs, targets, masks in train_loader:
-            inputs, targets, masks = inputs.to(device), targets.to(device), masks.to(device)
+        for inputs, targets, target_gain, target_gain_tilt, masks in train_loader:
+            inputs, targets, target_gain, target_gain_tilt, masks = \
+                inputs.to(device), targets.to(device), target_gain.to(device), \
+                target_gain_tilt.to(device), masks.to(device)
             
             optimizer.zero_grad()
-            outputs = model(inputs)
+            outputs = model(inputs, masks)
             loss = criterion(outputs, targets, masks)
             loss.backward()
             
@@ -150,29 +145,24 @@ def train_model(X_train, y_train, preprocessor, train_features, mask_cols):
             
             train_loss += loss.item() * masks.sum().item()
             
-        total_train_masks = sum(masks.sum().item() for _, _, masks in train_loader)
+        total_train_masks = sum(masks.sum().item() for _, _, _, _, masks in train_loader)
         train_loss /= total_train_masks
         
         model.eval()
         val_loss = 0.0
         with torch.no_grad():
-            for inputs, targets, masks in val_loader:
-                inputs, targets, masks = inputs.to(device), targets.to(device), masks.to(device)
-                outputs = model(inputs)
+            for inputs, targets, target_gain, target_gain_tilt, masks in val_loader:
+                inputs, targets, target_gain, target_gain_tilt, masks = \
+                    inputs.to(device), targets.to(device), target_gain.to(device), \
+                    target_gain_tilt.to(device), masks.to(device)
+                outputs = model(inputs, masks)
                 loss = criterion(outputs, targets, masks)
                 val_loss += loss.item() * masks.sum().item()
         
-        total_val_masks = sum(masks.sum().item() for _, _, masks in val_loader)
+        total_val_masks = sum(masks.sum().item() for _, _, _, _, masks in val_loader)
         val_loss /= total_val_masks
         
         current_lr = optimizer.param_groups[0]['lr']
-        
-        wandb.log({
-            'epoch': epoch + 1,
-            'train_loss': train_loss,
-            'val_loss': val_loss,
-            'learning_rate': current_lr
-        })
         
         scheduler.step(val_loss)
         
@@ -183,8 +173,6 @@ def train_model(X_train, y_train, preprocessor, train_features, mask_cols):
             best_val_loss = val_loss
             best_model_state = model.state_dict()
             patience_counter = 0
-            wandb.run.summary['best_val_loss'] = best_val_loss
-            wandb.run.summary['best_epoch'] = epoch + 1
         else:
             patience_counter += 1
             if patience_counter >= patience:
@@ -194,11 +182,15 @@ def train_model(X_train, y_train, preprocessor, train_features, mask_cols):
     if best_model_state:
         model.load_state_dict(best_model_state)
         
-    wrapper = PyTorchModelWrapper(model, target_normalizer, device)
-    y_pred = wrapper.predict(X_val)
+    wrapper = PyTorchModelWrapper(model, device)
+    y_pred = wrapper.predict(X_val, tg_val, tgt_val, mask_val)
     
     y_pred_masked = y_pred * mask_val
-    y_val_denorm = target_normalizer.inverse_transform(y_val)
+    
+    y_val_denorm = y_val + np.array([
+        compute_baseline_gain(tg, tgt) 
+        for tg, tgt in zip(tg_val, tgt_val)
+    ])
     y_val_masked = y_val_denorm * mask_val
     
     non_zero_mask = mask_val > 0
@@ -218,19 +210,6 @@ def train_model(X_train, y_train, preprocessor, train_features, mask_cols):
     print(f"  Max: {non_zero_preds.max():.4f}")
     print(f"  Count: {non_zero_preds.size}")
     
-    wandb.log({
-        'final_mse': mse,
-        'final_rmse': rmse,
-        'final_mae': mae
-    })
-    
-    wandb.run.summary['final_val_loss'] = best_val_loss
-    wandb.run.summary['final_mse'] = mse
-    wandb.run.summary['final_rmse'] = rmse
-    wandb.run.summary['final_mae'] = mae
-    
     metrics = {"mse": mse, "mae": mae, "rmse": rmse}
-    
-    wandb.finish()
     
     return wrapper, metrics

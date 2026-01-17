@@ -1,4 +1,5 @@
 import sys
+import numpy as np
 from pathlib import Path
 
 sys.path.append(str(Path(__file__).resolve().parent / "src"))
@@ -6,7 +7,8 @@ sys.path.append(str(Path(__file__).resolve().parent / "src"))
 from ofc_ml.data import load_data
 from ofc_ml.features import preprocess_features
 from ofc_ml.model import train_model
-from ofc_ml.utils import apply_mask, create_submission
+from ofc_ml.utils import create_submission
+from ofc_ml.network import compute_baseline_gain
 
 def main():
     train_features, train_labels, test_features = load_data()
@@ -22,11 +24,15 @@ def main():
     model, metrics = train_model(X_train, y_train, preprocessor, train_features, mask_cols)
     
     print("Predicting on test set...")
-    y_test_pred = model.predict(X_test)
+    test_masks = test_features[mask_cols].values
+    test_target_gain = test_features['target_gain'].values
+    test_target_gain_tilt = test_features['target_gain_tilt'].values
     
-    y_test_pred_masked = apply_mask(y_test_pred, test_features, mask_cols)
+    y_test_pred = model.predict(X_test, test_target_gain, test_target_gain_tilt, mask=test_masks)
     
-    create_submission(y_test_pred_masked, test_features, target_cols)
+    print(f"Final prediction shape: {y_test_pred.shape}")
+    
+    create_submission(y_test_pred, test_features, target_cols)
 
 if __name__ == "__main__":
     main()
