@@ -35,7 +35,9 @@ def preprocess_features(train_df, test_df):
     preprocessor = create_preprocessor(cat_cols, num_cols, spectra_cols, mask_cols)
     
     X_train = preprocessor.fit_transform(train_df)
-    X_test = preprocessor.transform(test_df)
+    
+    test_df_processed = test_df.drop(columns=['ID', 'Usage'], errors='ignore')
+    X_test = preprocessor.transform(test_df_processed)
     
     print(f"Feature shape: {X_train.shape}")
     print(f"  - Spectral features: {len(spectra_cols)}")
