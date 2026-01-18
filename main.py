@@ -1,6 +1,7 @@
 import sys
 import numpy as np
 from pathlib import Path
+import argparse
 
 sys.path.append(str(Path(__file__).resolve().parent / "src"))
 
@@ -9,8 +10,18 @@ from ofc_ml.features import preprocess_features
 from ofc_ml.model import train_model
 from ofc_ml.utils import create_submission
 from ofc_ml.network import compute_baseline_gain
+from ofc_ml import config as cfg
+
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument("--dataset-use", choices=["kaggle", "cosmos", "both"], default=None)
+    return p.parse_args()
 
 def main():
+    args = parse_args()
+    if args.dataset_use is not None:
+        cfg.DATASET_USE = args.dataset_use
+
     train_features, train_labels, test_features = load_data()
     
     assert len(train_features) == len(train_labels)

@@ -7,8 +7,26 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error
 import numpy as np
 from pathlib import Path
 
-from .config import RANDOM_STATE, TEST_SIZE, WANDB_PROJECT, WANDB_ENTITY, WANDB_MODE, DROPOUT, HIDDEN_DIMS, LEARNING_RATE, WEIGHT_DECAY, BATCH_SIZE, EARLY_STOPPING_PATIENCE
-from .network import SimpleGainPredictor, OFCDataset, TargetNormalizer, compute_baseline_gain
+from .config import (
+    RANDOM_STATE,
+    TEST_SIZE,
+    WANDB_PROJECT,
+    WANDB_ENTITY,
+    WANDB_MODE,
+    MODEL_TYPE,
+    DROPOUT,
+    HIDDEN_DIMS,
+    FOURIER_KAN_DROPOUT,
+    FOURIER_KAN_HIDDEN_DIMS,
+    FOURIER_KAN_N_FREQUENCIES,
+    FOURIER_KAN_CONCAT_MASK_INPUT,
+    LEARNING_RATE,
+    WEIGHT_DECAY,
+    BATCH_SIZE,
+    EARLY_STOPPING_PATIENCE,
+    DEVICE,
+)
+from .network import SimpleGainPredictor, FourierKANGainPredictor, OFCDataset, TargetNormalizer, compute_baseline_gain
 
 class PyTorchModelWrapper:
     def __init__(self, model, device):
@@ -24,6 +42,9 @@ class PyTorchModelWrapper:
             
             if mask is not None:
                 tensor_mask = torch.FloatTensor(mask).to(self.device)
+                # If the model was trained with mask concatenated into inputs, do the same at inference.
+                if str(MODEL_TYPE).lower().strip() in {"fourier_kan", "simple_kan"} and FOURIER_KAN_CONCAT_MASK_INPUT:
+                    tensor_X = torch.cat([tensor_X, tensor_mask], dim=1)
                 preds_offset = self.model(tensor_X, tensor_mask)
             else:
                 preds_offset = self.model(tensor_X)
@@ -58,7 +79,10 @@ class MaskedMSELoss(nn.Module):
 def train_model(X_train, y_train, preprocessor, train_features, mask_cols):
     print("Training simplified Neural Network model with baseline+offset approach...")
     
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    if torch.cuda.is_available():
+        device = torch.device(str(DEVICE))
+    else:
+        device = torch.device("cpu")
     print(f"Using device: {device}")
     
     target_gain_values = train_features['target_gain'].values
@@ -104,12 +128,30 @@ def train_model(X_train, y_train, preprocessor, train_features, mask_cols):
     input_dim = X_train.shape[1]
     output_dim = y_train.shape[1]
     
-    model = SimpleGainPredictor(
-        input_dim=input_dim, 
-        output_dim=output_dim,
-        hidden_dims=HIDDEN_DIMS,
-        dropout=DROPOUT
-    ).to(device)
+    model_type = str(MODEL_TYPE).lower().strip()
+    if model_type == "mlp":
+        model = SimpleGainPredictor(
+            input_dim=input_dim,
+            output_dim=output_dim,
+            hidden_dims=HIDDEN_DIMS,
+            dropout=DROPOUT
+        ).to(device)
+    elif model_type in {"fourier_kan", "simple_kan"}:
+        # Optionally include the 95-dim activation mask as part of the input features.
+        # This helps the model generalize across different channel activation patterns.
+        if FOURIER_KAN_CONCAT_MASK_INPUT:
+            input_dim = input_dim + train_masks.shape[1]
+            print(f"[fourier_kan] Concatenating mask into input: model_input_dim={input_dim}")
+        model = FourierKANGainPredictor(
+            input_dim=input_dim,
+            output_dim=output_dim,
+            hidden_dims=FOURIER_KAN_HIDDEN_DIMS,
+            dropout=FOURIER_KAN_DROPOUT,
+            use_residual=True,
+            n_frequencies=FOURIER_KAN_N_FREQUENCIES,
+        ).to(device)
+    else:
+        raise ValueError(f"Unsupported MODEL_TYPE={MODEL_TYPE!r}. Use 'mlp' or 'fourier_kan'.")
     
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Model parameters: {total_params:,}")
@@ -135,7 +177,11 @@ def train_model(X_train, y_train, preprocessor, train_features, mask_cols):
                 target_gain_tilt.to(device), masks.to(device)
             
             optimizer.zero_grad()
-            outputs = model(inputs, masks)
+            if model_type in {"fourier_kan", "simple_kan"} and FOURIER_KAN_CONCAT_MASK_INPUT:
+                inputs_for_model = torch.cat([inputs, masks], dim=1)
+            else:
+                inputs_for_model = inputs
+            outputs = model(inputs_for_model, masks)
             loss = criterion(outputs, targets, masks)
             loss.backward()
             
@@ -155,7 +201,11 @@ def train_model(X_train, y_train, preprocessor, train_features, mask_cols):
                 inputs, targets, target_gain, target_gain_tilt, masks = \
                     inputs.to(device), targets.to(device), target_gain.to(device), \
                     target_gain_tilt.to(device), masks.to(device)
-                outputs = model(inputs, masks)
+                if model_type in {"fourier_kan", "simple_kan"} and FOURIER_KAN_CONCAT_MASK_INPUT:
+                    inputs_for_model = torch.cat([inputs, masks], dim=1)
+                else:
+                    inputs_for_model = inputs
+                outputs = model(inputs_for_model, masks)
                 loss = criterion(outputs, targets, masks)
                 val_loss += loss.item() * masks.sum().item()
         
