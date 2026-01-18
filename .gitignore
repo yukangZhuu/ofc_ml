@@ -21,3 +21,6 @@ submission.csv
 
 # WandB
 wandb/
+
+# External datasets (local only)
+/data/cosmos-as-kaggle-by-gain/
