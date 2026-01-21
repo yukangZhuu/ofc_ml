@@ -33,7 +33,7 @@ def main() -> None:
         help="Path to COSMOS-EDFA-Dataset/dataset",
     )
     p.add_argument("--out-dir", type=Path, default=Path("/home/shaowen/ofc_ml/data/cosmos-as-kaggle"))
-    p.add_argument("--category", type=str, default="cosmos", help="Value to fill in Kaggle 'Category' column.")
+    p.add_argument("--category", type=str, default="unseen", help="Value to fill in Kaggle 'Category' column.")
     p.add_argument(
         "--edfa-types",
         type=str,

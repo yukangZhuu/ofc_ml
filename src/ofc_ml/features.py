@@ -1,6 +1,8 @@
+import numpy as np
 import pandas as pd
-from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import FunctionTransformer, OneHotEncoder, StandardScaler
 
 def get_feature_columns(df):
     cat_cols = ['Category', 'EDFA_type', 'edfa_index']
@@ -16,9 +18,15 @@ def get_feature_columns(df):
     return cat_cols, num_cols, spectra_cols, mask_cols
 
 def create_preprocessor(num_cols, spectra_cols, cat_cols):
+    spectra_pipeline = Pipeline([
+        # 光谱值先从 dB 转线性刻度：x_dB -> 10^(0.1 * x_dB)
+        ("to_linear", FunctionTransformer(lambda x: 1e3*np.power(10.0, 0.1 * x), feature_names_out="one-to-one")),
+        # ("scaler", StandardScaler()),
+    ])
+
     preprocessor = ColumnTransformer(
         transformers=[
-            ('spectra', StandardScaler(), spectra_cols),
+            ('spectra', spectra_pipeline, spectra_cols),
             ('num', StandardScaler(), num_cols),
             ('cat', OneHotEncoder(handle_unknown='ignore', sparse_output=False), cat_cols)
         ],

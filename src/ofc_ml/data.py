@@ -101,3 +101,40 @@ def load_data():
     except FileNotFoundError as e:
         print(f"Error loading data: {e}")
         raise
+
+
+def load_data_separate():
+    """
+    分别加载 COSMOS 和 Kaggle 数据集，用于两阶段训练。
+    
+    Returns:
+        tuple: (cosmos_features, cosmos_labels, kaggle_features, kaggle_labels, test_features)
+    """
+    try:
+        print("Loading datasets separately for two-stage training...")
+        
+        # 加载 COSMOS 数据集
+        cosmos_features, cosmos_labels = _load_cosmos_dataset()
+        print(f"COSMOS - Features: {cosmos_features.shape}, Labels: {cosmos_labels.shape}")
+        
+        # 加载 Kaggle 数据集
+        print(f"Loading Kaggle train from {cfg.TRAIN_FEATURES_PATH.parent}...")
+        kaggle_features = pd.read_csv(cfg.TRAIN_FEATURES_PATH)
+        kaggle_labels = pd.read_csv(cfg.TRAIN_LABELS_PATH)
+        print(f"Kaggle - Features: {kaggle_features.shape}, Labels: {kaggle_labels.shape}")
+        
+        # 验证schema一致性
+        if list(kaggle_features.columns) != list(cosmos_features.columns):
+            raise ValueError("Features schema mismatch between Kaggle and COSMOS datasets.")
+        if list(kaggle_labels.columns) != list(cosmos_labels.columns):
+            raise ValueError("Labels schema mismatch between Kaggle and COSMOS datasets.")
+        
+        # 加载测试集
+        test_features = pd.read_csv(cfg.TEST_FEATURES_PATH)
+        print(f"Test features shape: {test_features.shape}")
+        
+        return cosmos_features, cosmos_labels, kaggle_features, kaggle_labels, test_features
+        
+    except FileNotFoundError as e:
+        print(f"Error loading data: {e}")
+        raise
