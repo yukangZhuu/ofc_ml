@@ -32,6 +32,7 @@ from .config import (
     EARLY_STOPPING_PATIENCE,
     DEVICE,
     USE_TWO_STAGE_TRAINING,
+    LOAD_PRETRAINED_MODEL,
     PRETRAIN_LEARNING_RATE,
     PRETRAIN_WEIGHT_DECAY,
     PRETRAIN_BATCH_SIZE,
@@ -43,6 +44,7 @@ from .config import (
     FINETUNE_EPOCHS,
     FINETUNE_EARLY_STOPPING_PATIENCE,
     PRETRAIN_MODEL_PATH,
+    DISCRIMINATIVE_LR_DECAY,
 )
 from .network import SimpleGainPredictor, FourierKANGainPredictor, HybridFNOKANPredictor, OFCDataset, TargetNormalizer, compute_baseline_gain
 
@@ -96,6 +98,61 @@ class MaskedMSELoss(nn.Module):
         masked_squared_diff = squared_diff * mask
         loss = masked_squared_diff.sum() / mask.sum()
         return loss
+
+
+def get_layer_groups(model):
+    """
+    将模型分成多个层组，用于分层学习率设置
+    返回：层组列表，从底层到顶层
+    """
+    layer_groups = []
+    
+    # 获取所有命名的子模块
+    named_modules = list(model.named_children())
+    
+    if len(named_modules) == 0:
+        # 如果没有子模块，返回整个模型
+        return [list(model.parameters())]
+    
+    # 将每个主要模块作为一个组
+    for name, module in named_modules:
+        params = list(module.parameters())
+        if len(params) > 0:
+            layer_groups.append(params)
+    
+    return layer_groups
+
+
+def setup_discriminative_lr(model, base_lr, decay_factor=0.95):
+    """
+    设置判别式学习率：不同层使用不同的学习率
+    底层使用更小的学习率，顶层使用更大的学习率
+    
+    Args:
+        model: PyTorch模型
+        base_lr: 顶层的基础学习率
+        decay_factor: 学习率衰减因子（每往底层走一层，学习率乘以这个因子）
+    
+    Returns:
+        参数组列表，可直接传给optimizer
+    """
+    layer_groups = get_layer_groups(model)
+    num_groups = len(layer_groups)
+    
+    param_groups = []
+    for i, params in enumerate(layer_groups):
+        # 从底层到顶层，底层的i较小，所以lr较小
+        # 顶层的i较大（接近num_groups-1），所以lr较大
+        lr_multiplier = decay_factor ** (num_groups - 1 - i)
+        layer_lr = base_lr * lr_multiplier
+        param_groups.append({
+            'params': params,
+            'lr': layer_lr
+        })
+        print(f"  Layer group {i}: lr = {layer_lr:.6f} (multiplier: {lr_multiplier:.4f})")
+    
+    return param_groups
+
 
 def train_model(X_train, y_train, preprocessor, train_features, mask_cols):
     print("Training simplified Neural Network model with baseline+offset approach...")
@@ -303,6 +360,112 @@ def train_model(X_train, y_train, preprocessor, train_features, mask_cols):
     metrics = {"mse": mse, "mae": mae, "rmse": rmse}
     
     return wrapper, metrics
+
+
+def _train_discriminative_finetune(
+    model,
+    train_loader,
+    val_loader,
+    device,
+    base_learning_rate,
+    weight_decay,
+    epochs,
+    patience,
+    model_type="hybrid_fno_kan"
+):
+    """
+    判别式微调（Discriminative Fine-tuning）
+    不同层使用不同学习率：底层小学习率，顶层大学习率
+    """
+    print("\n" + "="*80)
+    print("DISCRIMINATIVE FINE-TUNING STRATEGY")
+    print("="*80)
+    
+    criterion = MaskedMSELoss()
+    best_val_loss = float('inf')
+    best_model_state = None
+    patience_counter = 0
+    
+    # ==================== 设置判别式学习率优化器 ====================
+    print(f"\n[Strategy] Discriminative Fine-tuning (lr_decay={DISCRIMINATIVE_LR_DECAY})")
+    param_groups = setup_discriminative_lr(model, base_learning_rate, DISCRIMINATIVE_LR_DECAY)
+    optimizer = optim.AdamW(param_groups, weight_decay=weight_decay)
+    
+    print("\n" + "-"*80)
+    print("Starting training...")
+    print("-"*80)
+    
+    # ==================== 训练循环 ====================
+    for epoch in range(epochs):
+        # Training
+        model.train()
+        train_loss = 0.0
+        for batch in train_loader:
+            X_batch, y_batch, tg_batch, tgt_batch, mask_batch = batch
+            X_batch = X_batch.to(device)
+            y_batch = y_batch.to(device)
+            mask_batch = mask_batch.to(device)
+            
+            # Concatenate mask if needed
+            if model_type in {"fourier_kan", "simple_kan"} and FOURIER_KAN_CONCAT_MASK_INPUT:
+                X_batch = torch.cat([X_batch, mask_batch], dim=1)
+            elif model_type == "hybrid_fno_kan" and HYBRID_FNO_KAN_CONCAT_MASK_INPUT:
+                X_batch = torch.cat([X_batch, mask_batch], dim=1)
+            
+            optimizer.zero_grad()
+            preds = model(X_batch, mask_batch)
+            loss = criterion(preds, y_batch, mask_batch)
+            loss.backward()
+            optimizer.step()
+            
+            train_loss += loss.item()
+        
+        train_loss /= len(train_loader)
+        
+        # Validation
+        model.eval()
+        val_loss = 0.0
+        with torch.no_grad():
+            for batch in val_loader:
+                X_batch, y_batch, tg_batch, tgt_batch, mask_batch = batch
+                X_batch = X_batch.to(device)
+                y_batch = y_batch.to(device)
+                mask_batch = mask_batch.to(device)
+                
+                if model_type in {"fourier_kan", "simple_kan"} and FOURIER_KAN_CONCAT_MASK_INPUT:
+                    X_batch = torch.cat([X_batch, mask_batch], dim=1)
+                elif model_type == "hybrid_fno_kan" and HYBRID_FNO_KAN_CONCAT_MASK_INPUT:
+                    X_batch = torch.cat([X_batch, mask_batch], dim=1)
+                
+                preds = model(X_batch, mask_batch)
+                loss = criterion(preds, y_batch, mask_batch)
+                val_loss += loss.item()
+        
+        val_loss /= len(val_loader)
+        
+        # 打印进度
+        if (epoch + 1) % 20 == 0:
+            current_lr = optimizer.param_groups[0]['lr']
+            print(f"Epoch {epoch+1}/{epochs} - Train Loss: {train_loss:.6f} - Val Loss: {val_loss:.6f} - LR: {current_lr:.6f}")
+        
+        # Early stopping
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_model_state = model.state_dict().copy()
+            patience_counter = 0
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                print(f"Early stopping at epoch {epoch+1}")
+                break
+    
+    print(f"Advanced finetuning completed. Best val loss: {best_val_loss:.6f}")
+    
+    # Load best model
+    if best_model_state:
+        model.load_state_dict(best_model_state)
+    
+    return model, best_val_loss
 
 
 def _train_one_stage(
@@ -563,40 +726,96 @@ def train_model_two_stage(
     print(f"\nModel parameters: {total_params:,}")
     
     # ==================== Stage 1: 预训练 ====================
-    model, pretrain_loss = _train_one_stage(
-        model=model,
-        train_loader=cosmos_train_loader,
-        val_loader=cosmos_val_loader,
-        device=device,
-        learning_rate=PRETRAIN_LEARNING_RATE,
-        weight_decay=PRETRAIN_WEIGHT_DECAY,
-        epochs=PRETRAIN_EPOCHS,
-        patience=PRETRAIN_EARLY_STOPPING_PATIENCE,
-        stage_name="STAGE 1: PRETRAINING ON COSMOS",
-        model_type=model_type
-    )
+    pretrain_loss = None
     
-    # 保存预训练模型
-    PRETRAIN_MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({
-        'model_state_dict': model.state_dict(),
-        'model_type': model_type,
-        'input_dim': input_dim,
-        'output_dim': output_dim,
-    }, PRETRAIN_MODEL_PATH)
-    print(f"\nPretrained model saved to: {PRETRAIN_MODEL_PATH}")
+    # 检查是否需要加载已有的预训练模型
+    if LOAD_PRETRAINED_MODEL and PRETRAIN_MODEL_PATH.exists():
+        print("\n" + "="*80)
+        print(f"LOADING PRETRAINED MODEL FROM: {PRETRAIN_MODEL_PATH}")
+        print("="*80)
+        
+        try:
+            checkpoint = torch.load(PRETRAIN_MODEL_PATH, map_location=device)
+            model.load_state_dict(checkpoint['model_state_dict'])
+            pretrain_loss = checkpoint.get('pretrain_loss', None)
+            
+            print(f"✓ Successfully loaded pretrained model!")
+            if pretrain_loss:
+                print(f"  Previous pretrain validation loss: {pretrain_loss:.6f}")
+            print(f"  Model type: {checkpoint.get('model_type', 'unknown')}")
+            print(f"  Input dim: {checkpoint.get('input_dim', 'unknown')}")
+            print(f"  Output dim: {checkpoint.get('output_dim', 'unknown')}")
+            print("\nSkipping Stage 1 (pretraining) and going directly to Stage 2 (finetuning)...")
+        
+        except Exception as e:
+            print(f"✗ Failed to load pretrained model: {e}")
+            print("Will perform full two-stage training from scratch...")
+            
+            # 执行预训练
+            model, pretrain_loss = _train_one_stage(
+                model=model,
+                train_loader=cosmos_train_loader,
+                val_loader=cosmos_val_loader,
+                device=device,
+                learning_rate=PRETRAIN_LEARNING_RATE,
+                weight_decay=PRETRAIN_WEIGHT_DECAY,
+                epochs=PRETRAIN_EPOCHS,
+                patience=PRETRAIN_EARLY_STOPPING_PATIENCE,
+                stage_name="STAGE 1: PRETRAINING ON COSMOS",
+                model_type=model_type
+            )
+            
+            # 保存预训练模型
+            PRETRAIN_MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+            torch.save({
+                'model_state_dict': model.state_dict(),
+                'model_type': model_type,
+                'input_dim': input_dim,
+                'output_dim': output_dim,
+                'pretrain_loss': pretrain_loss,
+            }, PRETRAIN_MODEL_PATH)
+            print(f"\nPretrained model saved to: {PRETRAIN_MODEL_PATH}")
     
-    # ==================== Stage 2: 微调 ====================
-    model, finetune_loss = _train_one_stage(
+    else:
+        # 不加载预训练模型，从头开始预训练
+        if LOAD_PRETRAINED_MODEL:
+            print(f"\n⚠ Pretrained model not found at: {PRETRAIN_MODEL_PATH}")
+            print("Will perform full two-stage training from scratch...")
+        
+        model, pretrain_loss = _train_one_stage(
+            model=model,
+            train_loader=cosmos_train_loader,
+            val_loader=cosmos_val_loader,
+            device=device,
+            learning_rate=PRETRAIN_LEARNING_RATE,
+            weight_decay=PRETRAIN_WEIGHT_DECAY,
+            epochs=PRETRAIN_EPOCHS,
+            patience=PRETRAIN_EARLY_STOPPING_PATIENCE,
+            stage_name="STAGE 1: PRETRAINING ON COSMOS",
+            model_type=model_type
+        )
+        
+        # 保存预训练模型
+        PRETRAIN_MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+        torch.save({
+            'model_state_dict': model.state_dict(),
+            'model_type': model_type,
+            'input_dim': input_dim,
+            'output_dim': output_dim,
+            'pretrain_loss': pretrain_loss,
+        }, PRETRAIN_MODEL_PATH)
+        print(f"\nPretrained model saved to: {PRETRAIN_MODEL_PATH}")
+    
+    # ==================== Stage 2: 判别式微调 ====================
+    model, finetune_loss = _train_discriminative_finetune(
         model=model,
         train_loader=kaggle_train_loader,
         val_loader=kaggle_val_loader,
         device=device,
-        learning_rate=FINETUNE_LEARNING_RATE,
+        base_learning_rate=FINETUNE_LEARNING_RATE,
         weight_decay=FINETUNE_WEIGHT_DECAY,
         epochs=FINETUNE_EPOCHS,
         patience=FINETUNE_EARLY_STOPPING_PATIENCE,
-        stage_name="STAGE 2: FINETUNING ON KAGGLE",
         model_type=model_type
     )
     

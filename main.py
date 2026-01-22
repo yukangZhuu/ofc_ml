@@ -17,12 +17,20 @@ def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--dataset-use", choices=["kaggle", "cosmos", "both"], default=None)
     p.add_argument("--two-stage", action="store_true", help="Use two-stage training (pretrain + finetune)")
+    p.add_argument("--load-pretrained", action="store_true", help="Load pretrained model if exists (skip pretraining)")
+    p.add_argument("--no-load-pretrained", action="store_true", help="Don't load pretrained model, retrain from scratch")
     return p.parse_args()
 
 def main():
     args = parse_args()
     if args.dataset_use is not None:
         cfg.DATASET_USE = args.dataset_use
+    
+    # 处理预训练模型加载参数
+    if args.load_pretrained:
+        cfg.LOAD_PRETRAINED_MODEL = True
+    elif args.no_load_pretrained:
+        cfg.LOAD_PRETRAINED_MODEL = False
     
     # 根据参数或配置决定是否使用两阶段训练
     use_two_stage = args.two_stage if args.two_stage else cfg.USE_TWO_STAGE_TRAINING

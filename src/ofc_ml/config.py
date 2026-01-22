@@ -72,6 +72,10 @@ DEVICE = "cuda"
 # Two-stage training (pretrain + finetune)
 USE_TWO_STAGE_TRAINING = True  # 是否使用两阶段训练
 
+# 是否从已有的预训练模型加载并跳过预训练阶段
+# 如果为 True 且 PRETRAIN_MODEL_PATH 存在，则直接加载预训练模型并开始微调
+LOAD_PRETRAINED_MODEL = True  # 如果预训练模型存在，直接加载
+
 # Stage 1: Pretrain on COSMOS dataset
 PRETRAIN_LEARNING_RATE = 0.001  # 预训练学习率（可以稍大）
 PRETRAIN_WEIGHT_DECAY = 1e-4
@@ -82,9 +86,14 @@ PRETRAIN_EARLY_STOPPING_PATIENCE = 50
 # Stage 2: Finetune on Kaggle dataset
 FINETUNE_LEARNING_RATE = 0.0004  # 微调学习率（通常更小）
 FINETUNE_WEIGHT_DECAY = 5e-5
-FINETUNE_BATCH_SIZE = 64  # 微调可以用更小的batch size
-FINETUNE_EPOCHS = 500
-FINETUNE_EARLY_STOPPING_PATIENCE = 80
+FINETUNE_BATCH_SIZE = 32  # 微调可以用更小的batch size
+FINETUNE_EPOCHS = 1000
+FINETUNE_EARLY_STOPPING_PATIENCE = 50
+
+# ==================== Discriminative Fine-tuning 策略 ====================
+# 判别式微调：不同层使用不同学习率（底层小学习率，顶层大学习率）
+DISCRIMINATIVE_LR_DECAY = 0.95  # 每往底层走一层，学习率衰减因子（0.95表示每层学习率是上一层的95%）
+# 例如：顶层 lr=0.0004, 下一层 lr=0.0004*0.95, 再下一层 lr=0.0004*0.95^2
 
 # Model checkpoint path
-PRETRAIN_MODEL_PATH = PROJECT_ROOT / "models" / "pretrained_model.pt"
+PRETRAIN_MODEL_PATH = PROJECT_ROOT / "models" / "pretrained_model0122.pt"

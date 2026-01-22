@@ -35,7 +35,7 @@ def round_submission(input_file, output_file, decimals=1):
     print("完成!")
 
 if __name__ == "__main__":
-    input_file = r"C:\Users\54620\OneDrive\邱淇智工作\2026OFC_ML_Competition\ofc_ml\submissions\submission_20260121_221328_new.csv"
-    output_file = r"C:\Users\54620\OneDrive\邱淇智工作\2026OFC_ML_Competition\ofc_ml\submissions\submission_20260121_221328_new.csv"
+    input_file = r"C:\Users\54620\OneDrive\邱淇智工作\2026OFC_ML_Competition\ofc_ml\submissions\submission_20260122_105107.csv"
+    output_file = r"C:\Users\54620\OneDrive\邱淇智工作\2026OFC_ML_Competition\ofc_ml\submissions\submission_20260122_105107_rounded.csv"
     
     round_submission(input_file, output_file, decimals=1)
