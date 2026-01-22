@@ -149,18 +149,32 @@ class SpectralMixingLayer(nn.Module):
     """
     轻量级频域混合层 (类似 FNO 但更简单)
     对输入的"特征维度"进行频域全局混合，捕获全局依赖关系
+    使用固定比例保留低频模态，确保不同维度下物理意义一致
     """
-    def __init__(self, hidden_dim: int, n_spectral_modes: int = 16):
+    def __init__(self, hidden_dim: int, freq_ratio: float = 0.5):
+        """
+        Args:
+            hidden_dim: 特征维度
+            freq_ratio: 保留的频率比例 (0-1之间)，例如0.5表示保留低50%的频率
+        """
         super().__init__()
         self.hidden_dim = hidden_dim
+        self.freq_ratio = freq_ratio
+        
         # FFT 后的频域维度
         self.freq_dim = hidden_dim // 2 + 1
-        self.n_modes = min(n_spectral_modes, self.freq_dim)  # 只保留低频模态
+        
+        # 根据比例计算要保留的模态数（至少保留1个）
+        self.n_modes = max(1, int(self.freq_dim * freq_ratio))
         
         # 频域可学习权重（复数）- 对每个频率模态
         # 形状: (n_modes,) - 每个频率一个复数权重
         self.weights_real = nn.Parameter(torch.randn(self.n_modes) * 0.02)
         self.weights_imag = nn.Parameter(torch.randn(self.n_modes) * 0.02)
+        
+        # 打印调试信息
+        print(f"[SpectralMixing] dim={hidden_dim}, freq_dim={self.freq_dim}, "
+              f"n_modes={self.n_modes} ({self.n_modes/self.freq_dim*100:.1f}% of frequencies)")
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -181,9 +195,9 @@ class SpectralMixingLayer(nn.Module):
         # 频域加权: (batch, n_modes) * (n_modes,) 广播
         out_ft[:, :self.n_modes] = x_ft[:, :self.n_modes] * weights_complex.unsqueeze(0)
         
-        # 高频部分衰减
-        if self.freq_dim > self.n_modes:
-            out_ft[:, self.n_modes:] = out_ft[:, self.n_modes:] * 0.1  # 高频衰减
+        # # 高频部分衰减
+        # if self.freq_dim > self.n_modes:
+        #     out_ft[:, self.n_modes:] = out_ft[:, self.n_modes:] * 0.1  # 高频衰减
         
         # 3. IFFT: 转回空间域
         out = torch.fft.irfft(out_ft, n=self.hidden_dim, dim=1)  # (batch, hidden_dim)
@@ -247,7 +261,8 @@ class FourierKANGainPredictor(nn.Module):
 class HybridFNOKANPredictor(nn.Module):
     """
     混合 FNO + FourierKAN 架构
-    在网络中间插入频域混合层，捕获全局通道间依赖
+    在每两个FourierKAN层之间插入频域混合层，捕获全局通道间依赖
+    使用固定频率保留比例，确保各层物理意义一致
     """
     def __init__(
         self,
@@ -257,53 +272,47 @@ class HybridFNOKANPredictor(nn.Module):
         dropout: float = 0.2,
         use_residual: bool = True,
         n_frequencies: int = 4,
-        n_spectral_modes: int = 16,
+        spectral_freq_ratio: float = 0.5,
         use_spectral_mixing: bool = True,
     ):
+        """
+        Args:
+            spectral_freq_ratio: 频域混合层保留的频率比例 (0-1)，默认0.5表示保留低50%频率
+        """
         super().__init__()
         if hidden_dims is None:
-            hidden_dims = [256, 256, 128, 128, 64]
+            hidden_dims = [256, 256, 128, 128, 128]
 
         self.use_residual = use_residual
         self.use_spectral_mixing = use_spectral_mixing
         
-        # 前期 FourierKAN blocks（特征提取）
-        self.blocks_early = nn.ModuleList()
-        self.proj_early = nn.ModuleList()
+        # FourierKAN blocks
+        self.blocks = nn.ModuleList()
+        self.proj = nn.ModuleList()
         
-        # 后期 FourierKAN blocks（精细调整）
-        self.blocks_late = nn.ModuleList()
-        self.proj_late = nn.ModuleList()
+        # 频域混合层（在每两个FourierKAN之间插入）
+        self.spectral_mixings = nn.ModuleList()
         
-        # 决定在哪一层插入频域混合
-        split_idx = len(hidden_dims) // 2  # 在中间插入
-        
-        # 构建前期层
+        # 构建交替的 FourierKAN Block 和 SpectralMixingLayer
         prev = input_dim
-        for i, h in enumerate(hidden_dims[:split_idx]):
-            self.blocks_early.append(FourierKANBlock(prev, h, dropout=dropout, n_frequencies=n_frequencies))
+        for i, h in enumerate(hidden_dims):
+            # 添加 FourierKAN Block
+            self.blocks.append(FourierKANBlock(prev, h, dropout=dropout, n_frequencies=n_frequencies))
+            
+            # 添加投影层（用于残差连接）
             if use_residual and prev != h:
                 p = nn.Linear(prev, h, bias=False)
                 nn.init.xavier_uniform_(p.weight)
-                self.proj_early.append(p)
+                self.proj.append(p)
             else:
-                self.proj_early.append(nn.Identity())
-            prev = h
-        
-        # 频域混合层
-        if self.use_spectral_mixing:
-            self.spectral_mixing = SpectralMixingLayer(prev, n_spectral_modes=n_spectral_modes)
-            print(f"[HybridFNOKAN] Inserted SpectralMixingLayer at layer {split_idx}, dim={prev}, modes={n_spectral_modes}")
-        
-        # 构建后期层
-        for i, h in enumerate(hidden_dims[split_idx:]):
-            self.blocks_late.append(FourierKANBlock(prev, h, dropout=dropout, n_frequencies=n_frequencies))
-            if use_residual and prev != h:
-                p = nn.Linear(prev, h, bias=False)
-                nn.init.xavier_uniform_(p.weight)
-                self.proj_late.append(p)
-            else:
-                self.proj_late.append(nn.Identity())
+                self.proj.append(nn.Identity())
+            
+            # 在每个FourierKAN Block后添加频域混合层（除了最后一层）
+            if self.use_spectral_mixing and i < len(hidden_dims) - 1:
+                spectral_layer = SpectralMixingLayer(h, freq_ratio=spectral_freq_ratio)
+                self.spectral_mixings.append(spectral_layer)
+                print(f"[HybridFNOKAN] Inserted SpectralMixingLayer after block {i}")
+            
             prev = h
 
         # 输出层
@@ -311,27 +320,25 @@ class HybridFNOKANPredictor(nn.Module):
         nn.init.xavier_uniform_(self.head.weight)
         if self.head.bias is not None:
             nn.init.constant_(self.head.bias, 0.0)
+        
+        print(f"[HybridFNOKAN] Total architecture: {len(self.blocks)} FourierKAN Blocks + {len(self.spectral_mixings)} SpectralMixing Layers")
 
     def forward(self, x, mask=None):
         out = x
         
-        # 前期处理
-        for block, proj in zip(self.blocks_early, self.proj_early):
+        # 交替处理：FourierKAN Block → SpectralMixing → FourierKAN Block → ...
+        spectral_idx = 0
+        for i, (block, proj) in enumerate(zip(self.blocks, self.proj)):
+            # FourierKAN Block with residual
             if self.use_residual:
                 out = block(out) + proj(out)
             else:
                 out = block(out)
-        
-        # 频域混合（全局通道交互）
-        if self.use_spectral_mixing:
-            out = out + self.spectral_mixing(out)  # 残差连接
-        
-        # 后期处理
-        for block, proj in zip(self.blocks_late, self.proj_late):
-            if self.use_residual:
-                out = block(out) + proj(out)
-            else:
-                out = block(out)
+            
+            # 如果不是最后一层，且启用了频域混合，则应用SpectralMixing
+            if self.use_spectral_mixing and i < len(self.blocks) - 1:
+                out = out + self.spectral_mixings[spectral_idx](out)  # 残差连接
+                spectral_idx += 1
 
         # 输出
         out = self.head(out)

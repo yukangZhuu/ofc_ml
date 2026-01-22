@@ -6,6 +6,8 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 import numpy as np
 from pathlib import Path
+import time
+from tqdm import tqdm
 
 from .config import (
     RANDOM_STATE,
@@ -23,7 +25,7 @@ from .config import (
     HYBRID_FNO_KAN_DROPOUT,
     HYBRID_FNO_KAN_HIDDEN_DIMS,
     HYBRID_FNO_KAN_N_FREQUENCIES,
-    HYBRID_FNO_KAN_N_SPECTRAL_MODES,
+    HYBRID_FNO_KAN_SPECTRAL_FREQ_RATIO,
     HYBRID_FNO_KAN_USE_SPECTRAL_MIXING,
     HYBRID_FNO_KAN_CONCAT_MASK_INPUT,
     LEARNING_RATE,
@@ -240,7 +242,7 @@ def train_model(X_train, y_train, preprocessor, train_features, mask_cols):
             dropout=HYBRID_FNO_KAN_DROPOUT,
             use_residual=True,
             n_frequencies=HYBRID_FNO_KAN_N_FREQUENCIES,
-            n_spectral_modes=HYBRID_FNO_KAN_N_SPECTRAL_MODES,
+            spectral_freq_ratio=HYBRID_FNO_KAN_SPECTRAL_FREQ_RATIO,
             use_spectral_mixing=HYBRID_FNO_KAN_USE_SPECTRAL_MIXING,
         ).to(device)
     else:
@@ -261,10 +263,17 @@ def train_model(X_train, y_train, preprocessor, train_features, mask_cols):
     patience = EARLY_STOPPING_PATIENCE
     patience_counter = 0
     
-    for epoch in range(epochs):
+    # 记录训练开始时间
+    training_start_time = time.time()
+    epoch_start_time = time.time()
+    
+    for epoch in tqdm(range(epochs), desc="Training Progress", unit="epoch"):
         model.train()
         train_loss = 0.0
-        for inputs, targets, target_gain, target_gain_tilt, masks in train_loader:
+        
+        # 训练循环添加进度条
+        train_pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} [Train]", leave=False)
+        for inputs, targets, target_gain, target_gain_tilt, masks in train_pbar:
             inputs, targets, target_gain, target_gain_tilt, masks = \
                 inputs.to(device), targets.to(device), target_gain.to(device), \
                 target_gain_tilt.to(device), masks.to(device)
@@ -285,6 +294,9 @@ def train_model(X_train, y_train, preprocessor, train_features, mask_cols):
             optimizer.step()
             
             train_loss += loss.item() * masks.sum().item()
+            
+            # 更新进度条显示当前loss
+            train_pbar.set_postfix({'loss': f'{loss.item():.6f}'})
             
         total_train_masks = sum(masks.sum().item() for _, _, _, _, masks in train_loader)
         train_loss /= total_train_masks
@@ -314,7 +326,21 @@ def train_model(X_train, y_train, preprocessor, train_features, mask_cols):
         scheduler.step(val_loss)
         
         if (epoch + 1) % 20 == 0:
-            print(f"Epoch {epoch+1}/{epochs} - Train Loss: {train_loss:.6f} - Val Loss: {val_loss:.6f} - LR: {current_lr:.6f}")
+            # 计算从训练开始到现在的总时间
+            total_elapsed = time.time() - training_start_time
+            # 计算最近20个epoch的时间
+            epoch_elapsed = time.time() - epoch_start_time
+            epoch_start_time = time.time()  # 重置计时器
+            
+            # 格式化时间显示
+            total_hours, total_remainder = divmod(int(total_elapsed), 3600)
+            total_minutes, total_seconds = divmod(total_remainder, 60)
+            epoch_minutes, epoch_seconds = divmod(int(epoch_elapsed), 60)
+            
+            print(f"\nEpoch {epoch+1}/{epochs} | "
+                  f"Train Loss: {train_loss:.6f} | Val Loss: {val_loss:.6f} | LR: {current_lr:.6f}")
+            print(f"  └─ Last 20 epochs: {epoch_minutes}m {epoch_seconds}s | "
+                  f"Total time: {total_hours}h {total_minutes}m {total_seconds}s\n")
             
         if val_loss < best_val_loss:
             best_val_loss = val_loss
@@ -325,6 +351,13 @@ def train_model(X_train, y_train, preprocessor, train_features, mask_cols):
             if patience_counter >= patience:
                 print(f"Early stopping at epoch {epoch+1}")
                 break
+    
+    # 计算总训练时间
+    total_training_time = time.time() - training_start_time
+    hours, remainder = divmod(int(total_training_time), 3600)
+    minutes, seconds = divmod(remainder, 60)
+    print(f"\nTraining completed!")
+    print(f"  └─ Total training time: {hours}h {minutes}m {seconds}s\n")
     
     if best_model_state:
         model.load_state_dict(best_model_state)
@@ -504,11 +537,18 @@ def _train_one_stage(
     print(f"Max epochs: {epochs}")
     print(f"Early stopping patience: {patience}")
     
-    for epoch in range(epochs):
+    # 记录训练开始时间
+    training_start_time = time.time()
+    epoch_start_time = time.time()
+    
+    for epoch in tqdm(range(epochs), desc=f"{stage_name} Progress", unit="epoch"):
         # Training
         model.train()
         train_loss = 0.0
-        for inputs, targets, target_gain, target_gain_tilt, masks in train_loader:
+        
+        # 训练循环添加进度条
+        train_pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} [Train]", leave=False)
+        for inputs, targets, target_gain, target_gain_tilt, masks in train_pbar:
             inputs, targets, target_gain, target_gain_tilt, masks = \
                 inputs.to(device), targets.to(device), target_gain.to(device), \
                 target_gain_tilt.to(device), masks.to(device)
@@ -531,6 +571,9 @@ def _train_one_stage(
             optimizer.step()
             
             train_loss += loss.item() * masks.sum().item()
+            
+            # 更新进度条显示当前loss
+            train_pbar.set_postfix({'loss': f'{loss.item():.6f}'})
         
         total_train_masks = sum(masks.sum().item() for _, _, _, _, masks in train_loader)
         train_loss /= total_train_masks
@@ -539,7 +582,9 @@ def _train_one_stage(
         model.eval()
         val_loss = 0.0
         with torch.no_grad():
-            for inputs, targets, target_gain, target_gain_tilt, masks in val_loader:
+            # 验证循环添加进度条
+            val_pbar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} [Val]", leave=False)
+            for inputs, targets, target_gain, target_gain_tilt, masks in val_pbar:
                 inputs, targets, target_gain, target_gain_tilt, masks = \
                     inputs.to(device), targets.to(device), target_gain.to(device), \
                     target_gain_tilt.to(device), masks.to(device)
@@ -554,6 +599,9 @@ def _train_one_stage(
                 outputs = model(inputs_for_model, masks)
                 loss = criterion(outputs, targets, masks)
                 val_loss += loss.item() * masks.sum().item()
+                
+                # 更新进度条显示当前loss
+                val_pbar.set_postfix({'loss': f'{loss.item():.6f}'})
         
         total_val_masks = sum(masks.sum().item() for _, _, _, _, masks in val_loader)
         val_loss /= total_val_masks
@@ -563,7 +611,21 @@ def _train_one_stage(
         
         # 打印进度
         if (epoch + 1) % 20 == 0:
-            print(f"Epoch {epoch+1}/{epochs} - Train Loss: {train_loss:.6f} - Val Loss: {val_loss:.6f} - LR: {current_lr:.6f}")
+            # 计算从训练开始到现在的总时间
+            total_elapsed = time.time() - training_start_time
+            # 计算最近20个epoch的时间
+            epoch_elapsed = time.time() - epoch_start_time
+            epoch_start_time = time.time()  # 重置计时器
+            
+            # 格式化时间显示
+            total_hours, total_remainder = divmod(int(total_elapsed), 3600)
+            total_minutes, total_seconds = divmod(total_remainder, 60)
+            epoch_minutes, epoch_seconds = divmod(int(epoch_elapsed), 60)
+            
+            print(f"\nEpoch {epoch+1}/{epochs} | "
+                  f"Train Loss: {train_loss:.6f} | Val Loss: {val_loss:.6f} | LR: {current_lr:.6f}")
+            print(f"  └─ Last 20 epochs: {epoch_minutes}m {epoch_seconds}s | "
+                  f"Total time: {total_hours}h {total_minutes}m {total_seconds}s\n")
         
         # Early stopping
         if val_loss < best_val_loss:
@@ -576,7 +638,14 @@ def _train_one_stage(
                 print(f"Early stopping at epoch {epoch+1}")
                 break
     
-    print(f"{stage_name} completed. Best val loss: {best_val_loss:.6f}")
+    # 计算总训练时间
+    total_training_time = time.time() - training_start_time
+    hours, remainder = divmod(int(total_training_time), 3600)
+    minutes, seconds = divmod(remainder, 60)
+    
+    print(f"\n{stage_name} completed!")
+    print(f"  └─ Best val loss: {best_val_loss:.6f}")
+    print(f"  └─ Total training time: {hours}h {minutes}m {seconds}s\n")
     
     # Load best model
     if best_model_state:
@@ -716,7 +785,7 @@ def train_model_two_stage(
             dropout=HYBRID_FNO_KAN_DROPOUT,
             use_residual=True,
             n_frequencies=HYBRID_FNO_KAN_N_FREQUENCIES,
-            n_spectral_modes=HYBRID_FNO_KAN_N_SPECTRAL_MODES,
+            spectral_freq_ratio=HYBRID_FNO_KAN_SPECTRAL_FREQ_RATIO,
             use_spectral_mixing=HYBRID_FNO_KAN_USE_SPECTRAL_MIXING,
         ).to(device)
     else:
