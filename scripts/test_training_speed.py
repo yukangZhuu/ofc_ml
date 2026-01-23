@@ -27,20 +27,29 @@ print()
 
 # 尝试导入
 try:
-    from ofc_ml.network import HybridFNOKANPredictor, MaskedMSELoss
+    from ofc_ml.network import HybridFNOKANPredictor
+    from ofc_ml.model import MaskedMSELoss
     print("✅ Successfully imported modules")
 except ImportError as e:
     print(f"❌ Failed to import: {e}")
     print(f"Trying alternative import method...")
     
-    # 尝试直接导入network模块
+    # 尝试直接导入模块
     try:
         import importlib.util
+        
+        # 导入network.py
         spec = importlib.util.spec_from_file_location("network", SRC_DIR / "ofc_ml" / "network.py")
         network_module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(network_module)
         HybridFNOKANPredictor = network_module.HybridFNOKANPredictor
-        MaskedMSELoss = network_module.MaskedMSELoss
+        
+        # 导入model.py
+        spec = importlib.util.spec_from_file_location("model", SRC_DIR / "ofc_ml" / "model.py")
+        model_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(model_module)
+        MaskedMSELoss = model_module.MaskedMSELoss
+        
         print("✅ Successfully imported using importlib")
     except Exception as e2:
         print(f"❌ Alternative import also failed: {e2}")
