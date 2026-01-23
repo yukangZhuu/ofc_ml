@@ -20,7 +20,7 @@ OUTPUT_CONFIG = {
 }
 
 FEATURE_CONFIG = {
-    "USE_MASK": "none", # concat, multiply, none
+    "USE_MASK": "concat", # concat, multiply, none
 }
 
 MODEL_CONFIG = {
@@ -34,8 +34,9 @@ MODEL_CONFIG = {
 TRAINING_CONFIG = {
     "DEVICE": "cuda",
     "LOAD_PRETRAINED_MODEL": True,
-    "PRETRAIN_MODEL_PATH": PROJECT_ROOT / "models" / "pretrained_model_zyk_0123_01_none.pt",
+    "PRETRAIN_MODEL_PATH": PROJECT_ROOT / "models" / "pretrained_model_zyk_0123_01_concat_no_category_kaggle_loss.pt",
     "USE_MIXED_PRECISION": False,  # 关闭混合精度（FP16）- 在此模型上反而变慢
+    "USE_KAGGLE_SCORE_LOSS": "none", # "none", "finetune", "both"
 }
 
 PRETRAIN_CONFIG = {
@@ -82,6 +83,7 @@ DEVICE = TRAINING_CONFIG["DEVICE"]
 LOAD_PRETRAINED_MODEL = TRAINING_CONFIG["LOAD_PRETRAINED_MODEL"]
 PRETRAIN_MODEL_PATH = TRAINING_CONFIG["PRETRAIN_MODEL_PATH"]
 USE_MIXED_PRECISION = TRAINING_CONFIG.get("USE_MIXED_PRECISION", False)
+USE_KAGGLE_SCORE_LOSS = TRAINING_CONFIG.get("USE_KAGGLE_SCORE_LOSS", "finetune")
 
 PRETRAIN_LEARNING_RATE = PRETRAIN_CONFIG["LEARNING_RATE"]
 PRETRAIN_WEIGHT_DECAY = PRETRAIN_CONFIG["WEIGHT_DECAY"]

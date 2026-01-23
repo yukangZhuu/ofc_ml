@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.amp import autocast, GradScaler
@@ -33,6 +34,7 @@ from .config import (
     FINETUNE_EARLY_STOPPING_PATIENCE,
     PRETRAIN_MODEL_PATH,
     USE_MIXED_PRECISION,
+    USE_KAGGLE_SCORE_LOSS,
 )
 from .network import HybridFNOKANPredictor, OFCDataset, compute_baseline_gain
 
@@ -66,6 +68,95 @@ class PyTorchModelWrapper:
 
             return preds
 
+
+class KaggleScoreLoss(nn.Module):
+    """
+    Differentiable approximation of the Kaggle Score metric.
+    
+    Score = MAE + 0.3 * T95 + 0.1 * Tmax + 0.15 * Std
+    
+    Since Quantile and Max are hard to differentiate stably, we use approximations:
+    - MAE: Standard L1 Loss
+    - Std: Standard deviation calculation
+    - T95: Approximate 95th percentile using Top-K mean (e.g., top 5% mean)
+    - Tmax: Approximate Max using LogSumExp (Softmax) or simply Max (which is differentiable)
+    
+    This loss is intended for finetuning.
+    """
+    def __init__(self, tau=0.5, beta=0.7):
+        super(KaggleScoreLoss, self).__init__()
+        self.tau = tau
+        self.beta = beta
+
+    def forward(self, predictions, targets, mask):
+        # Flatten and filter by mask
+        mask_bool = mask > 0
+        diff = torch.abs(predictions - targets)
+        
+        # We need to compute metrics per row first, then average?
+        # The Kaggle metric says:
+        # Per row MAE: a_i = mean(e_ij)
+        # Dataset level MAE: a_bar = mean(a_i)
+        # This is equivalent to global mean absolute error if all rows have same weight,
+        # but here we should follow row-wise logic if possible.
+        # However, for batch training, we compute over the batch.
+        
+        # 1. Masked Absolute Error
+        # e_ij = |y - y_hat| * mask
+        e = diff * mask
+        
+        # Row-wise counts (K_i)
+        K = mask.sum(dim=1)
+        # Avoid division by zero
+        K = torch.clamp(K, min=1.0)
+        
+        # Row-wise MAE (a_i)
+        a_i = e.sum(dim=1) / K
+        a_bar = a_i.mean()
+        
+        # Row-wise STD (s_i)
+        # s_i = sqrt( mean( (e_ij - a_i)^2 ) ) over valid j
+        # We need to handle the broadcasting of a_i carefully
+        # e_ij is [B, C], a_i is [B]
+        # Only compute for valid masks
+        e_centered = (e - a_i.unsqueeze(1)) * mask # Zero out invalid positions
+        # Variance = sum(e_centered^2) / K
+        var_i = (e_centered ** 2).sum(dim=1) / K
+        s_i = torch.sqrt(var_i + 1e-12) # Add epsilon for stability
+        s_bar = s_i.mean()
+        
+        # 2. Global Quantile & Max Penalty
+        # Flatten all valid errors in the batch
+        all_valid_errors = e[mask_bool]
+        
+        if all_valid_errors.numel() == 0:
+            return a_bar # Fallback
+            
+        # 95% Quantile Approximation
+        # Sorting is differentiable in PyTorch
+        sorted_errors, _ = torch.sort(all_valid_errors)
+        n_errors = sorted_errors.numel()
+        idx95 = int(0.95 * n_errors)
+        # Use a smooth approximation: mean of top 5% errors
+        # This acts as an upper bound for p95 and provides stronger gradients for the tail
+        if idx95 < n_errors:
+            # p95_approx = sorted_errors[idx95] # Direct p95
+            # Robust version: Top 5% Mean (Expected Shortfall / CVaR)
+            p95_approx = sorted_errors[idx95:].mean()
+        else:
+            p95_approx = sorted_errors[-1]
+            
+        t95 = F.relu(p95_approx - a_bar - self.tau)
+        
+        # Max Penalty
+        # Max is differentiable (gradient flows to the max element)
+        e_max = all_valid_errors.max()
+        t_max = F.relu(e_max - p95_approx - self.beta)
+        
+        # Final Score
+        loss = a_bar + 0.3 * t95 + 0.1 * t_max + 0.15 * s_bar
+        
+        return loss
 
 class MaskedMSELoss(nn.Module):
     def __init__(self):
@@ -308,6 +399,15 @@ def train_model_two_stage(
             print(f"✗ Failed to load model: {e}. Retraining...")
 
     if run_pretraining:
+        # Determine Loss Function for Pretraining
+        use_kaggle_loss_pretrain = USE_KAGGLE_SCORE_LOSS in ["both"]
+        criterion_pretrain = KaggleScoreLoss() if use_kaggle_loss_pretrain else MaskedMSELoss()
+        print(f"[Loss] Pretraining using: {type(criterion_pretrain).__name__}")
+        
+        # Re-initialize trainer if loss changed from default
+        if use_kaggle_loss_pretrain:
+            trainer = Trainer(model, device, criterion=criterion_pretrain, use_amp=USE_MIXED_PRECISION)
+
         optimizer = optim.Adam(model.parameters(), lr=PRETRAIN_LEARNING_RATE, weight_decay=PRETRAIN_WEIGHT_DECAY)
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=15)
         
@@ -328,13 +428,27 @@ def train_model_two_stage(
         }, PRETRAIN_MODEL_PATH)
         print(f"Pretrained model saved to {PRETRAIN_MODEL_PATH}")
 
+    # Create a wrapper for the pretrained model (before finetuning)
+    # We need to deepcopy the model state because training continues in-place
+    import copy
+    pretrained_model_state = copy.deepcopy(model.state_dict())
+    
     # -------------------------------------------------------------------------
     # 4. Stage 2: Finetuning (Kaggle)
     # -------------------------------------------------------------------------
     print("\n[Finetune] Starting finetuning...")
+    
+    # Determine Loss Function for Finetuning
+    use_kaggle_loss_finetune = USE_KAGGLE_SCORE_LOSS in ["finetune", "both"]
+    criterion_ft = KaggleScoreLoss() if use_kaggle_loss_finetune else MaskedMSELoss()
+    print(f"[Loss] Finetuning using: {type(criterion_ft).__name__}")
+    
+    # Re-initialize trainer with new loss (always re-init to be safe)
+    trainer_ft = Trainer(model, device, criterion=criterion_ft, use_amp=USE_MIXED_PRECISION)
+    
     optimizer_ft = optim.AdamW(model.parameters(), lr=FINETUNE_LEARNING_RATE, weight_decay=FINETUNE_WEIGHT_DECAY)
     
-    finetune_loss = trainer.fit(
+    finetune_loss = trainer_ft.fit(
         kaggle_train_loader, kaggle_val_loader, optimizer_ft,
         epochs=FINETUNE_EPOCHS, patience=FINETUNE_EARLY_STOPPING_PATIENCE,
         title="Stage 2: Finetuning (Kaggle)"
@@ -347,9 +461,24 @@ def train_model_two_stage(
     print("FINAL EVALUATION")
     print("="*80)
     
-    wrapper = PyTorchModelWrapper(model, device)
+    # Wrapper for Finetuned Model
+    wrapper_finetuned = PyTorchModelWrapper(model, device)
     
-    # Calculate metrics on Kaggle validation set
+    # Wrapper for Pretrained Model
+    model_pretrained = HybridFNOKANPredictor(
+        input_dim=X_cosmos.shape[1],
+        output_dim=y_offset_cosmos.shape[1],
+        hidden_dims=HYBRID_FNO_KAN_HIDDEN_DIMS,
+        dropout=HYBRID_FNO_KAN_DROPOUT,
+        use_residual=True,
+        n_frequencies=HYBRID_FNO_KAN_N_FREQUENCIES,
+        spectral_freq_ratio=HYBRID_FNO_KAN_SPECTRAL_FREQ_RATIO,
+        use_spectral_mixing=HYBRID_FNO_KAN_USE_SPECTRAL_MIXING,
+    ).to(device)
+    model_pretrained.load_state_dict(pretrained_model_state)
+    wrapper_pretrained = PyTorchModelWrapper(model_pretrained, device)
+    
+    # Calculate metrics on Kaggle validation set (Finetuned)
     y_pred_offset = model(torch.FloatTensor(X_k_val).to(device), torch.FloatTensor(mask_k_val).to(device))
     y_pred_offset = y_pred_offset.detach().cpu().numpy()
     
@@ -371,4 +500,4 @@ def train_model_two_stage(
         "finetune_loss": finetune_loss
     }
 
-    return wrapper, metrics
+    return wrapper_finetuned, wrapper_pretrained, metrics

@@ -7,7 +7,10 @@ from sklearn.base import BaseEstimator, TransformerMixin
 from . import config as cfg
 
 def get_feature_columns(df):
-    cat_cols = ['Category', 'EDFA_type', 'edfa_index']
+    # 'Category' is removed because it has inconsistent semantics between pretraining (dataset name)
+    # and finetuning (device state). We want the model to learn physics from spectra/power, 
+    # not rely on explicit state labels that might be unavailable in deployment.
+    cat_cols = ['EDFA_type', 'edfa_index']
     
     num_cols = ['target_gain', 'target_gain_tilt', 'EDFA_input_power_total', 'EDFA_output_power_total']
     

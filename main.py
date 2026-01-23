@@ -48,7 +48,7 @@ def main():
     _, X_test, mask_cols, preprocessor = preprocess_features(combined_features, test_features)
     
     # 两阶段训练
-    model, metrics = train_model_two_stage(
+    model_finetuned, model_pretrained, metrics = train_model_two_stage(
         cosmos_features, cosmos_labels,
         kaggle_features, kaggle_labels,
         test_features,
@@ -56,22 +56,40 @@ def main():
         mask_cols
     )
     
-    # 测试集预测
+    # 测试集预测 (Finetuned)
     print("\n" + "="*80)
-    print("PREDICTING ON TEST SET")
+    print("PREDICTING ON TEST SET (Finetuned)")
     print("="*80)
     
     test_masks = test_features[mask_cols].values
     test_target_gain = test_features['target_gain'].values
     test_target_gain_tilt = test_features['target_gain_tilt'].values
     
-    y_test_pred = model.predict(X_test, test_target_gain, test_target_gain_tilt, mask=test_masks)
-    
-    print(f"Final prediction shape: {y_test_pred.shape}")
+    y_test_pred_ft = model_finetuned.predict(X_test, test_target_gain, test_target_gain_tilt, mask=test_masks)
+    print(f"Finetuned prediction shape: {y_test_pred_ft.shape}")
     
     # 生成提交文件（列名需要前导零，如 calculated_gain_spectra_00）
-    target_cols = [f'calculated_gain_spectra_{i:02d}' for i in range(y_test_pred.shape[1])]
-    create_submission(y_test_pred, test_features, target_cols)
+    target_cols = [f'calculated_gain_spectra_{i:02d}' for i in range(y_test_pred_ft.shape[1])]
+    
+    # Save Finetuned Submission
+    from ofc_ml.config import SUBMISSION_DIR
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    ft_path = SUBMISSION_DIR / f"submission_{timestamp}_finetuned.csv"
+    create_submission(y_test_pred_ft, test_features, target_cols, output_path=ft_path)
+    
+    # 测试集预测 (Pretrained)
+    print("\n" + "="*80)
+    print("PREDICTING ON TEST SET (Pretrained)")
+    print("="*80)
+    
+    y_test_pred_pt = model_pretrained.predict(X_test, test_target_gain, test_target_gain_tilt, mask=test_masks)
+    print(f"Pretrained prediction shape: {y_test_pred_pt.shape}")
+    
+    # Save Pretrained Submission
+    pt_path = SUBMISSION_DIR / f"submission_{timestamp}_pretrained.csv"
+    create_submission(y_test_pred_pt, test_features, target_cols, output_path=pt_path)
 
 if __name__ == "__main__":
     main()
