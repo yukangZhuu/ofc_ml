@@ -34,7 +34,7 @@ MODEL_CONFIG = {
 TRAINING_CONFIG = {
     "DEVICE": "cuda",
     "LOAD_PRETRAINED_MODEL": True,
-    "PRETRAIN_MODEL_PATH": PROJECT_ROOT / "models" / "pretrained_model_zyk_0123_01_concat_no_category_512.pt",
+    "PRETRAIN_MODEL_PATH": PROJECT_ROOT / "models" / "pretrained_model_zyk_0123_01_concat_no_category.pt",
     "USE_MIXED_PRECISION": False,  # 关闭混合精度（FP16）- 在此模型上反而变慢
     "USE_KAGGLE_SCORE_LOSS": "none", # "none", "finetune", "both"
 }
@@ -42,7 +42,7 @@ TRAINING_CONFIG = {
 PRETRAIN_CONFIG = {
     "LEARNING_RATE": 0.001,
     "WEIGHT_DECAY": 1e-4,
-    "BATCH_SIZE": 512,
+    "BATCH_SIZE": 256,
     "EPOCHS": 500,
     "EARLY_STOPPING_PATIENCE": 40,
     "VAL_EVERY_N_EPOCHS": 2,  # 每2个epoch验证一次
