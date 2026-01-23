@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
+from torch.cuda.amp import autocast, GradScaler
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 import numpy as np
@@ -24,6 +25,7 @@ from .config import (
     PRETRAIN_BATCH_SIZE,
     PRETRAIN_EPOCHS,
     PRETRAIN_EARLY_STOPPING_PATIENCE,
+    PRETRAIN_VAL_EVERY_N_EPOCHS,
     FINETUNE_LEARNING_RATE,
     FINETUNE_WEIGHT_DECAY,
     FINETUNE_BATCH_SIZE,
@@ -31,6 +33,7 @@ from .config import (
     FINETUNE_EARLY_STOPPING_PATIENCE,
     PRETRAIN_MODEL_PATH,
     DISCRIMINATIVE_LR_DECAY,
+    USE_MIXED_PRECISION,
 )
 from .network import HybridFNOKANPredictor, OFCDataset, TargetNormalizer, compute_baseline_gain
 
@@ -151,6 +154,13 @@ def _train_discriminative_finetune(
     best_model_state = None
     patience_counter = 0
 
+    scaler = GradScaler() if USE_MIXED_PRECISION and device.type == 'cuda' else None
+    
+    if scaler is not None:
+        print(f"Mixed precision training: Enabled (FP16)")
+    else:
+        print(f"Mixed precision training: Disabled")
+
     print(f"\n[Strategy] Discriminative Fine-tuning (lr_decay={DISCRIMINATIVE_LR_DECAY})")
     param_groups = setup_discriminative_lr(model, base_learning_rate, DISCRIMINATIVE_LR_DECAY)
     optimizer = optim.AdamW(param_groups, weight_decay=weight_decay)
@@ -169,10 +179,20 @@ def _train_discriminative_finetune(
             mask_batch = mask_batch.to(device)
 
             optimizer.zero_grad()
-            preds = model(X_batch, mask_batch)
-            loss = criterion(preds, y_batch, mask_batch)
-            loss.backward()
-            optimizer.step()
+            
+            if scaler is not None:
+                with autocast():
+                    preds = model(X_batch, mask_batch)
+                    loss = criterion(preds, y_batch, mask_batch)
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                preds = model(X_batch, mask_batch)
+                loss = criterion(preds, y_batch, mask_batch)
+                loss.backward()
+                optimizer.step()
 
             train_loss += loss.item()
 
@@ -224,7 +244,8 @@ def _train_one_stage(
     weight_decay,
     epochs,
     patience,
-    stage_name="Training"
+    stage_name="Training",
+    val_every_n_epochs=1
 ):
     """
     训练一个阶段（预训练或微调）
@@ -234,6 +255,13 @@ def _train_one_stage(
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.5, patience=15, min_lr=1e-7
     )
+
+    scaler = GradScaler() if USE_MIXED_PRECISION and device.type == 'cuda' else None
+    
+    if scaler is not None:
+        print(f"Mixed precision training: Enabled (FP16)")
+    else:
+        print(f"Mixed precision training: Disabled")
 
     best_val_loss = float('inf')
     best_model_state = None
@@ -272,12 +300,21 @@ def _train_one_stage(
 
             optimizer.zero_grad()
 
-            outputs = model(inputs, masks)
-            loss = criterion(outputs, targets, masks)
-            loss.backward()
-
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
+            if scaler is not None:
+                with autocast():
+                    outputs = model(inputs, masks)
+                    loss = criterion(outputs, targets, masks)
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                outputs = model(inputs, masks)
+                loss = criterion(outputs, targets, masks)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
 
             train_loss += loss.item() * masks.sum().item()
             total_train_masks += masks.sum().item()
@@ -302,52 +339,61 @@ def _train_one_stage(
 
         train_loss /= total_train_masks
 
-        model.eval()
-        val_loss = 0.0
-        total_val_masks = 0.0
+        should_validate = (epoch + 1) % val_every_n_epochs == 0
         
-        with torch.no_grad():
-            val_pbar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} [Val]", leave=False)
-            for inputs, targets, target_gain, target_gain_tilt, masks in val_pbar:
-                inputs, targets, target_gain, target_gain_tilt, masks = \
-                    inputs.to(device), targets.to(device), target_gain.to(device), \
-                    target_gain_tilt.to(device), masks.to(device)
+        if should_validate:
+            model.eval()
+            val_loss = 0.0
+            total_val_masks = 0.0
+            
+            with torch.no_grad():
+                val_pbar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} [Val]", leave=False)
+                for inputs, targets, target_gain, target_gain_tilt, masks in val_pbar:
+                    inputs, targets, target_gain, target_gain_tilt, masks = \
+                        inputs.to(device), targets.to(device), target_gain.to(device), \
+                        target_gain_tilt.to(device), masks.to(device)
 
-                outputs = model(inputs, masks)
-                loss = criterion(outputs, targets, masks)
-                val_loss += loss.item() * masks.sum().item()
-                total_val_masks += masks.sum().item()
+                    if scaler is not None:
+                        with autocast():
+                            outputs = model(inputs, masks)
+                            loss = criterion(outputs, targets, masks)
+                    else:
+                        outputs = model(inputs, masks)
+                        loss = criterion(outputs, targets, masks)
+                    
+                    val_loss += loss.item() * masks.sum().item()
+                    total_val_masks += masks.sum().item()
 
-                val_pbar.set_postfix({'loss': f'{loss.item():.6f}'})
+                    val_pbar.set_postfix({'loss': f'{loss.item():.6f}'})
 
-        val_loss /= total_val_masks
+            val_loss /= total_val_masks
 
-        current_lr = optimizer.param_groups[0]['lr']
-        scheduler.step(val_loss)
+            current_lr = optimizer.param_groups[0]['lr']
+            scheduler.step(val_loss)
 
-        if (epoch + 1) % 20 == 0:
-            total_elapsed = time.time() - training_start_time
-            epoch_elapsed = time.time() - epoch_start_time
-            epoch_start_time = time.time()
+            if (epoch + 1) % 20 == 0:
+                total_elapsed = time.time() - training_start_time
+                epoch_elapsed = time.time() - epoch_start_time
+                epoch_start_time = time.time()
 
-            total_hours, total_remainder = divmod(int(total_elapsed), 3600)
-            total_minutes, total_seconds = divmod(total_remainder, 60)
-            epoch_minutes, epoch_seconds = divmod(int(epoch_elapsed), 60)
+                total_hours, total_remainder = divmod(int(total_elapsed), 3600)
+                total_minutes, total_seconds = divmod(total_remainder, 60)
+                epoch_minutes, epoch_seconds = divmod(int(epoch_elapsed), 60)
 
-            print(f"\nEpoch {epoch+1}/{epochs} | "
-                  f"Train Loss: {train_loss:.6f} | Val Loss: {val_loss:.6f} | LR: {current_lr:.6f}")
-            print(f"  └─ Last 20 epochs: {epoch_minutes}m {epoch_seconds}s | "
-                  f"Total time: {total_hours}h {total_minutes}m {total_seconds}s\n")
+                print(f"\nEpoch {epoch+1}/{epochs} | "
+                      f"Train Loss: {train_loss:.6f} | Val Loss: {val_loss:.6f} | LR: {current_lr:.6f}")
+                print(f"  └─ Last 20 epochs: {epoch_minutes}m {epoch_seconds}s | "
+                      f"Total time: {total_hours}h {total_minutes}m {total_seconds}s\n")
 
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            best_model_state = model.state_dict().copy()
-            patience_counter = 0
-        else:
-            patience_counter += 1
-            if patience_counter >= patience:
-                print(f"Early stopping at epoch {epoch+1}")
-                break
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                best_model_state = model.state_dict().copy()
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    print(f"Early stopping at epoch {epoch+1}")
+                    break
 
     total_training_time = time.time() - training_start_time
     hours, remainder = divmod(int(total_training_time), 3600)
@@ -534,7 +580,8 @@ def train_model_two_stage(
                 weight_decay=PRETRAIN_WEIGHT_DECAY,
                 epochs=PRETRAIN_EPOCHS,
                 patience=PRETRAIN_EARLY_STOPPING_PATIENCE,
-                stage_name="STAGE 1: PRETRAINING ON COSMOS"
+                stage_name="STAGE 1: PRETRAINING ON COSMOS",
+                val_every_n_epochs=PRETRAIN_VAL_EVERY_N_EPOCHS
             )
 
             PRETRAIN_MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -561,7 +608,8 @@ def train_model_two_stage(
             weight_decay=PRETRAIN_WEIGHT_DECAY,
             epochs=PRETRAIN_EPOCHS,
             patience=PRETRAIN_EARLY_STOPPING_PATIENCE,
-            stage_name="STAGE 1: PRETRAINING ON COSMOS"
+            stage_name="STAGE 1: PRETRAINING ON COSMOS",
+            val_every_n_epochs=PRETRAIN_VAL_EVERY_N_EPOCHS
         )
 
         PRETRAIN_MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
