@@ -24,10 +24,13 @@ def compute_baseline_gain(target_gain, target_gain_tilt, num_channels=95):
     if np.isscalar(target_gain):
         baseline = target_gain + target_gain_tilt * (center_idx - channel_indices) / (num_channels - 1)
     else:
-        batch_size = len(target_gain)
-        baseline = np.zeros((batch_size, num_channels))
-        for i in range(batch_size):
-            baseline[i] = target_gain[i] + target_gain_tilt[i] * (center_idx - channel_indices) / (num_channels - 1)
+        # Vectorized implementation: (batch_size, 1) + (batch_size, 1) * (1, num_channels)
+        target_gain = np.array(target_gain).reshape(-1, 1)
+        target_gain_tilt = np.array(target_gain_tilt).reshape(-1, 1)
+        channel_indices = channel_indices.reshape(1, -1)
+        
+        tilt_factor = (center_idx - channel_indices) / (num_channels - 1)
+        baseline = target_gain + target_gain_tilt * tilt_factor
 
     return baseline
 

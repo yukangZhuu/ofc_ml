@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 from torch.amp import autocast, GradScaler
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, mean_absolute_error
@@ -32,10 +32,10 @@ from .config import (
     FINETUNE_EPOCHS,
     FINETUNE_EARLY_STOPPING_PATIENCE,
     PRETRAIN_MODEL_PATH,
-    DISCRIMINATIVE_LR_DECAY,
     USE_MIXED_PRECISION,
 )
-from .network import HybridFNOKANPredictor, OFCDataset, TargetNormalizer, compute_baseline_gain
+from .network import HybridFNOKANPredictor, OFCDataset, compute_baseline_gain
+
 
 class PyTorchModelWrapper:
     def __init__(self, model, device):
@@ -57,10 +57,7 @@ class PyTorchModelWrapper:
 
             preds_offset = preds_offset.cpu().numpy()
 
-            baseline = np.array([
-                compute_baseline_gain(tg, tgt)
-                for tg, tgt in zip(target_gain, target_gain_tilt)
-            ])
+            baseline = compute_baseline_gain(target_gain, target_gain_tilt)
 
             preds = baseline + preds_offset
 
@@ -82,331 +79,154 @@ class MaskedMSELoss(nn.Module):
         return loss
 
 
-def get_layer_groups(model):
-    """
-    将模型分成多个层组，用于分层学习率设置
-    返回：层组列表，从底层到顶层
-    """
-    layer_groups = []
+def prepare_data(features, labels, preprocessor, mask_cols, target_cols=None):
+    """Extract and process features and targets from raw dataframes."""
+    target_gain = features['target_gain'].values
+    target_gain_tilt = features['target_gain_tilt'].values
+    masks = features[mask_cols].values
 
-    named_modules = list(model.named_children())
-
-    if len(named_modules) == 0:
-        return [list(model.parameters())]
-
-    for name, module in named_modules:
-        params = list(module.parameters())
-        if len(params) > 0:
-            layer_groups.append(params)
-
-    return layer_groups
-
-
-def setup_discriminative_lr(model, base_lr, decay_factor=0.95):
-    """
-    设置判别式学习率：不同层使用不同的学习率
-    底层使用更小的学习率，顶层使用更大的学习率
-
-    Args:
-        model: PyTorch模型
-        base_lr: 顶层的基础学习率
-        decay_factor: 学习率衰减因子（每往底层走一层，学习率乘以这个因子）
-
-    Returns:
-        参数组列表，可直接传给optimizer
-    """
-    layer_groups = get_layer_groups(model)
-    num_groups = len(layer_groups)
-
-    param_groups = []
-    for i, params in enumerate(layer_groups):
-        lr_multiplier = decay_factor ** (num_groups - 1 - i)
-        layer_lr = base_lr * lr_multiplier
-        param_groups.append({
-            'params': params,
-            'lr': layer_lr
-        })
-        print(f"  Layer group {i}: lr = {layer_lr:.6f} (multiplier: {lr_multiplier:.4f})")
-
-    return param_groups
-
-
-def _train_discriminative_finetune(
-    model,
-    train_loader,
-    val_loader,
-    device,
-    base_learning_rate,
-    weight_decay,
-    epochs,
-    patience
-):
-    """
-    判别式微调（Discriminative Fine-tuning）
-    不同层使用不同学习率：底层小学习率，顶层大学习率
-    """
-    print("\n" + "="*80)
-    print("DISCRIMINATIVE FINE-TUNING STRATEGY")
-    print("="*80)
-
-    criterion = MaskedMSELoss()
-    best_val_loss = float('inf')
-    best_model_state = None
-    patience_counter = 0
-
-    scaler = GradScaler() if USE_MIXED_PRECISION and device.type == 'cuda' else None
+    feature_cols = [c for c in features.columns if c not in mask_cols]
     
-    if scaler is not None:
-        print(f"Mixed precision training: Enabled (FP16)")
-    else:
-        print(f"Mixed precision training: Disabled")
+    # Check if we are in 'multiply' mode, which needs mask columns
+    # We can infer this by checking if the preprocessor expects mask columns
+    # A simple way is to pass the entire dataframe if feature_cols doesn't match preprocessor expectations
+    # But a cleaner way is to just pass the whole dataframe, as ColumnTransformer ignores extra columns if remainder='drop'
+    X = preprocessor.transform(features)
 
-    print(f"\n[Strategy] Discriminative Fine-tuning (lr_decay={DISCRIMINATIVE_LR_DECAY})")
-    param_groups = setup_discriminative_lr(model, base_learning_rate, DISCRIMINATIVE_LR_DECAY)
-    optimizer = optim.AdamW(param_groups, weight_decay=weight_decay)
+    y_offset = None
+    if labels is not None and target_cols is not None:
+        y = labels[target_cols].values
+        baseline = compute_baseline_gain(target_gain, target_gain_tilt)
+        y_offset = (y - baseline) * masks
 
-    print("\n" + "-"*80)
-    print("Starting training...")
-    print("-"*80)
-
-    for epoch in range(epochs):
-        model.train()
-        train_loss = 0.0
-        for batch in train_loader:
-            X_batch, y_batch, tg_batch, tgt_batch, mask_batch = batch
-            X_batch = X_batch.to(device)
-            y_batch = y_batch.to(device)
-            mask_batch = mask_batch.to(device)
-
-            optimizer.zero_grad()
-            
-            if scaler is not None:
-                with autocast():
-                    preds = model(X_batch, mask_batch)
-                    loss = criterion(preds, y_batch, mask_batch)
-                scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                preds = model(X_batch, mask_batch)
-                loss = criterion(preds, y_batch, mask_batch)
-                loss.backward()
-                optimizer.step()
-
-            train_loss += loss.item()
-
-        train_loss /= len(train_loader)
-
-        model.eval()
-        val_loss = 0.0
-        with torch.no_grad():
-            for batch in val_loader:
-                X_batch, y_batch, tg_batch, tgt_batch, mask_batch = batch
-                X_batch = X_batch.to(device)
-                y_batch = y_batch.to(device)
-                mask_batch = mask_batch.to(device)
-
-                preds = model(X_batch, mask_batch)
-                loss = criterion(preds, y_batch, mask_batch)
-                val_loss += loss.item()
-
-        val_loss /= len(val_loader)
-
-        if (epoch + 1) % 20 == 0:
-            current_lr = optimizer.param_groups[0]['lr']
-            print(f"Epoch {epoch+1}/{epochs} - Train Loss: {train_loss:.6f} - Val Loss: {val_loss:.6f} - LR: {current_lr:.6f}")
-
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            best_model_state = model.state_dict().copy()
-            patience_counter = 0
-        else:
-            patience_counter += 1
-            if patience_counter >= patience:
-                print(f"Early stopping at epoch {epoch+1}")
-                break
-
-    print(f"Advanced finetuning completed. Best val loss: {best_val_loss:.6f}")
-
-    if best_model_state:
-        model.load_state_dict(best_model_state)
-
-    return model, best_val_loss
+    return X, y_offset, target_gain, target_gain_tilt, masks
 
 
-def _train_one_stage(
-    model,
-    train_loader,
-    val_loader,
-    device,
-    learning_rate,
-    weight_decay,
-    epochs,
-    patience,
-    stage_name="Training",
-    val_every_n_epochs=1
-):
-    """
-    训练一个阶段（预训练或微调）
-    """
-    criterion = MaskedMSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=15, min_lr=1e-7
+def create_dataloaders(X, y_offset, tg, tgt, masks, batch_size, test_size, random_state, device):
+    """Split data and create PyTorch DataLoaders."""
+    X_tr, X_val, y_tr, y_val, mask_tr, mask_val, tg_tr, tg_val, tgt_tr, tgt_val = train_test_split(
+        X, y_offset, masks, tg, tgt, test_size=test_size, random_state=random_state
     )
 
-    scaler = GradScaler() if USE_MIXED_PRECISION and device.type == 'cuda' else None
-    
-    if scaler is not None:
-        print(f"Mixed precision training: Enabled (FP16)")
-    else:
-        print(f"Mixed precision training: Disabled")
+    train_dataset = OFCDataset(X_tr, y_tr, tg_tr, tgt_tr, mask_tr)
+    val_dataset = OFCDataset(X_val, y_val, tg_val, tgt_val, mask_val)
 
-    best_val_loss = float('inf')
-    best_model_state = None
-    patience_counter = 0
+    num_workers = 4 if device.type == 'cuda' else 0
+    pin_memory = device.type == 'cuda'
 
-    print(f"\n{'='*60}")
-    print(f"{stage_name}")
-    print(f"{'='*60}")
-    print(f"Learning rate: {learning_rate}")
-    print(f"Weight decay: {weight_decay}")
-    print(f"Max epochs: {epochs}")
-    print(f"Early stopping patience: {patience}")
+    train_loader = DataLoader(
+        train_dataset, batch_size=batch_size, shuffle=True,
+        num_workers=num_workers, pin_memory=pin_memory
+    )
+    val_loader = DataLoader(
+        val_dataset, batch_size=batch_size, shuffle=False,
+        num_workers=num_workers, pin_memory=pin_memory
+    )
 
-    training_start_time = time.time()
-    epoch_start_time = time.time()
-    
-    if device.type == 'cuda':
-        print(f"GPU: {torch.cuda.get_device_name(0)}")
-        print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
+    # Return validation components for final evaluation
+    val_data = (X_val, y_val, tg_val, tgt_val, mask_val)
+    return train_loader, val_loader, val_data
 
-    for epoch in tqdm(range(epochs), desc=f"{stage_name} Progress", unit="epoch"):
-        epoch_start_time = time.time()
-        model.train()
-        train_loss = 0.0
 
-        train_pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} [Train]", leave=False)
-        batch_times = []
-        total_train_masks = 0.0
+class Trainer:
+    """Handles the training loop, validation, and early stopping."""
+    def __init__(self, model, device, criterion=None, use_amp=False):
+        self.model = model
+        self.device = device
+        self.criterion = criterion or MaskedMSELoss()
+        self.scaler = GradScaler() if use_amp and device.type == 'cuda' else None
         
-        for inputs, targets, target_gain, target_gain_tilt, masks in train_pbar:
-            batch_start = time.time()
-            
-            inputs, targets, target_gain, target_gain_tilt, masks = \
-                inputs.to(device), targets.to(device), target_gain.to(device), \
-                target_gain_tilt.to(device), masks.to(device)
+        if self.scaler:
+            print("Mixed precision training: Enabled (FP16)")
 
+    def train_epoch(self, loader, optimizer):
+        self.model.train()
+        total_loss = 0.0
+        total_masks = 0.0
+        
+        pbar = tqdm(loader, leave=False, desc="Training")
+        for batch in pbar:
+            X, y, _, _, mask = [b.to(self.device) for b in batch]
             optimizer.zero_grad()
+            
+            with autocast(device_type=self.device.type, enabled=self.scaler is not None):
+                preds = self.model(X, mask)
+                loss = self.criterion(preds, y, mask)
 
-            if scaler is not None:
-                with autocast():
-                    outputs = model(inputs, masks)
-                    loss = criterion(outputs, targets, masks)
-                scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                scaler.step(optimizer)
-                scaler.update()
+            if self.scaler:
+                self.scaler.scale(loss).backward()
+                self.scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+                self.scaler.step(optimizer)
+                self.scaler.update()
             else:
-                outputs = model(inputs, masks)
-                loss = criterion(outputs, targets, masks)
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
                 optimizer.step()
-
-            train_loss += loss.item() * masks.sum().item()
-            total_train_masks += masks.sum().item()
+                
+            loss_val = loss.item()
+            mask_sum = mask.sum().item()
+            total_loss += loss_val * mask_sum
+            total_masks += mask_sum
             
-            batch_time = time.time() - batch_start
-            batch_times.append(batch_time)
-
-            train_pbar.set_postfix({
-                'loss': f'{loss.item():.6f}',
-                'batch_time': f'{batch_time*1000:.1f}ms'
-            })
-        
-        avg_batch_time = np.mean(batch_times) if batch_times else 0
-        samples_per_sec = len(train_loader.dataset) / (sum(batch_times) if batch_times else 1)
-        
-        if device.type == 'cuda' and epoch == 0:
-            print(f"  First epoch stats:")
-            print(f"    Avg batch time: {avg_batch_time*1000:.1f}ms")
-            print(f"    Samples/sec: {samples_per_sec:.1f}")
-            print(f"    GPU Memory used: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB")
-            torch.cuda.reset_peak_memory_stats()
-
-        train_loss /= total_train_masks
-
-        should_validate = (epoch + 1) % val_every_n_epochs == 0
-        
-        if should_validate:
-            model.eval()
-            val_loss = 0.0
-            total_val_masks = 0.0
+            pbar.set_postfix({'loss': f'{loss_val:.6f}'})
             
-            with torch.no_grad():
-                val_pbar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} [Val]", leave=False)
-                for inputs, targets, target_gain, target_gain_tilt, masks in val_pbar:
-                    inputs, targets, target_gain, target_gain_tilt, masks = \
-                        inputs.to(device), targets.to(device), target_gain.to(device), \
-                        target_gain_tilt.to(device), masks.to(device)
+        return total_loss / total_masks if total_masks > 0 else 0.0
 
-                    if scaler is not None:
-                        with autocast():
-                            outputs = model(inputs, masks)
-                            loss = criterion(outputs, targets, masks)
-                    else:
-                        outputs = model(inputs, masks)
-                        loss = criterion(outputs, targets, masks)
+    def validate(self, loader):
+        self.model.eval()
+        total_loss = 0.0
+        total_masks = 0.0
+        
+        with torch.no_grad():
+            for batch in loader:
+                X, y, _, _, mask = [b.to(self.device) for b in batch]
+                
+                with autocast(device_type=self.device.type, enabled=self.scaler is not None):
+                    preds = self.model(X, mask)
+                    loss = self.criterion(preds, y, mask)
                     
-                    val_loss += loss.item() * masks.sum().item()
-                    total_val_masks += masks.sum().item()
+                total_loss += loss.item() * mask.sum().item()
+                total_masks += mask.sum().item()
+                
+        return total_loss / total_masks if total_masks > 0 else 0.0
 
-                    val_pbar.set_postfix({'loss': f'{loss.item():.6f}'})
-
-            val_loss /= total_val_masks
-
-            current_lr = optimizer.param_groups[0]['lr']
-            scheduler.step(val_loss)
-
-            if (epoch + 1) % 20 == 0:
-                total_elapsed = time.time() - training_start_time
-                epoch_elapsed = time.time() - epoch_start_time
-                epoch_start_time = time.time()
-
-                total_hours, total_remainder = divmod(int(total_elapsed), 3600)
-                total_minutes, total_seconds = divmod(total_remainder, 60)
-                epoch_minutes, epoch_seconds = divmod(int(epoch_elapsed), 60)
-
-                print(f"\nEpoch {epoch+1}/{epochs} | "
-                      f"Train Loss: {train_loss:.6f} | Val Loss: {val_loss:.6f} | LR: {current_lr:.6f}")
-                print(f"  └─ Last 20 epochs: {epoch_minutes}m {epoch_seconds}s | "
-                      f"Total time: {total_hours}h {total_minutes}m {total_seconds}s\n")
-
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                best_model_state = model.state_dict().copy()
-                patience_counter = 0
-            else:
-                patience_counter += 1
-                if patience_counter >= patience:
-                    print(f"Early stopping at epoch {epoch+1}")
-                    break
-
-    total_training_time = time.time() - training_start_time
-    hours, remainder = divmod(int(total_training_time), 3600)
-    minutes, seconds = divmod(remainder, 60)
-
-    print(f"\n{stage_name} completed!")
-    print(f"  └─ Best val loss: {best_val_loss:.6f}")
-    print(f"  └─ Total training time: {hours}h {minutes}m {seconds}s\n")
-
-    if best_model_state:
-        model.load_state_dict(best_model_state)
-
-    return model, best_val_loss
+    def fit(self, train_loader, val_loader, optimizer, epochs, patience, 
+            scheduler=None, val_every_n=1, title="Training"):
+        print(f"\n{'='*60}\n{title}\n{'='*60}")
+        best_loss = float('inf')
+        patience_counter = 0
+        best_state = None
+        
+        for epoch in range(epochs):
+            train_loss = self.train_epoch(train_loader, optimizer)
+            
+            if (epoch + 1) % val_every_n == 0:
+                val_loss = self.validate(val_loader)
+                
+                if scheduler:
+                    if isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau):
+                        scheduler.step(val_loss)
+                    else:
+                        scheduler.step()
+                        
+                current_lr = optimizer.param_groups[0]['lr']
+                print(f"Epoch {epoch+1}/{epochs} - Train: {train_loss:.6f} - Val: {val_loss:.6f} - LR: {current_lr:.8f}")
+                
+                if val_loss < best_loss:
+                    best_loss = val_loss
+                    best_state = self.model.state_dict().copy()
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                    if patience_counter >= patience:
+                        print(f"Early stopping at epoch {epoch+1}")
+                        break
+        
+        if best_state:
+            self.model.load_state_dict(best_state)
+            
+        return best_loss
 
 
 def train_model_two_stage(
@@ -417,125 +237,48 @@ def train_model_two_stage(
     mask_cols
 ):
     """
-    两阶段训练：
-    1. 在 COSMOS 数据集上预训练
-    2. 在 Kaggle 数据集上微调
+    Two-Stage Training:
+    1. Pretrain on COSMOS dataset.
+    2. Discriminative Finetune on Kaggle dataset.
     """
-    print("\n" + "="*80)
-    print("TWO-STAGE TRAINING: PRETRAIN (COSMOS) + FINETUNE (KAGGLE)")
-    print("="*80)
-
     device = torch.device(str(DEVICE)) if torch.cuda.is_available() else torch.device("cpu")
     print(f"Using device: {device}")
-    
-    if device.type == 'cuda':
-        print(f"GPU: {torch.cuda.get_device_name(0)}")
-        print(f"CUDA Version: {torch.version.cuda}")
-        print(f"cuDNN Version: {torch.backends.cudnn.version()}")
-        print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
-        print(f"GPU Memory Free: {torch.cuda.memory_allocated(0) / 1024**3:.2f} GB")
 
-    print("\n[Stage 1] Preparing COSMOS dataset for pretraining...")
-
-    cosmos_target_gain = cosmos_features['target_gain'].values
-    cosmos_target_gain_tilt = cosmos_features['target_gain_tilt'].values
-    cosmos_masks = cosmos_features[mask_cols].values
-
-    cosmos_feature_cols = [c for c in cosmos_features.columns if c not in mask_cols]
-    X_cosmos = preprocessor.transform(cosmos_features[cosmos_feature_cols])
-
+    # -------------------------------------------------------------------------
+    # 1. Data Preparation
+    # -------------------------------------------------------------------------
     target_cols = [c for c in cosmos_labels.columns if 'calculated_gain_spectra_' in c]
     target_cols.sort()
-    y_cosmos = cosmos_labels[target_cols].values
 
-    cosmos_baseline = np.array([
-        compute_baseline_gain(tg, tgt)
-        for tg, tgt in zip(cosmos_target_gain, cosmos_target_gain_tilt)
-    ])
-    cosmos_offset = (y_cosmos - cosmos_baseline) * cosmos_masks
-
-    print(f"COSMOS dataset: {len(X_cosmos)} samples")
-
-    X_cosmos_tr, X_cosmos_val, y_cosmos_tr, y_cosmos_val, \
-    mask_cosmos_tr, mask_cosmos_val, tg_cosmos_tr, tg_cosmos_val, \
-    tgt_cosmos_tr, tgt_cosmos_val = train_test_split(
-        X_cosmos, cosmos_offset, cosmos_masks,
-        cosmos_target_gain, cosmos_target_gain_tilt,
-        test_size=TEST_SIZE, random_state=RANDOM_STATE
+    # COSMOS Data
+    print("\n[Data] Preparing COSMOS dataset...")
+    X_cosmos, y_offset_cosmos, tg_cosmos, tgt_cosmos, mask_cosmos = prepare_data(
+        cosmos_features, cosmos_labels, preprocessor, mask_cols, target_cols
     )
-
-    cosmos_train_dataset = OFCDataset(X_cosmos_tr, y_cosmos_tr, tg_cosmos_tr, tgt_cosmos_tr, mask_cosmos_tr)
-    cosmos_val_dataset = OFCDataset(X_cosmos_val, y_cosmos_val, tg_cosmos_val, tgt_cosmos_val, mask_cosmos_val)
-
-    num_workers = 4 if device.type == 'cuda' else 0
-    pin_memory = device.type == 'cuda'
-    
-    cosmos_train_loader = DataLoader(
-        cosmos_train_dataset, 
-        batch_size=PRETRAIN_BATCH_SIZE, 
-        shuffle=True,
-        num_workers=num_workers,
-        pin_memory=pin_memory
+    cosmos_loaders = create_dataloaders(
+        X_cosmos, y_offset_cosmos, tg_cosmos, tgt_cosmos, mask_cosmos,
+        PRETRAIN_BATCH_SIZE, TEST_SIZE, RANDOM_STATE, device
     )
-    cosmos_val_loader = DataLoader(
-        cosmos_val_dataset, 
-        batch_size=PRETRAIN_BATCH_SIZE, 
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=pin_memory
+    cosmos_train_loader, cosmos_val_loader, _ = cosmos_loaders
+
+    # Kaggle Data
+    print("[Data] Preparing Kaggle dataset...")
+    X_kaggle, y_offset_kaggle, tg_kaggle, tgt_kaggle, mask_kaggle = prepare_data(
+        kaggle_features, kaggle_labels, preprocessor, mask_cols, target_cols
     )
-
-    print("\n[Stage 2] Preparing Kaggle dataset for finetuning...")
-
-    kaggle_target_gain = kaggle_features['target_gain'].values
-    kaggle_target_gain_tilt = kaggle_features['target_gain_tilt'].values
-    kaggle_masks = kaggle_features[mask_cols].values
-
-    kaggle_feature_cols = [c for c in kaggle_features.columns if c not in mask_cols]
-    X_kaggle = preprocessor.transform(kaggle_features[kaggle_feature_cols])
-
-    y_kaggle = kaggle_labels[target_cols].values
-
-    kaggle_baseline = np.array([
-        compute_baseline_gain(tg, tgt)
-        for tg, tgt in zip(kaggle_target_gain, kaggle_target_gain_tilt)
-    ])
-    kaggle_offset = (y_kaggle - kaggle_baseline) * kaggle_masks
-
-    print(f"Kaggle dataset: {len(X_kaggle)} samples")
-
-    X_kaggle_tr, X_kaggle_val, y_kaggle_tr, y_kaggle_val, \
-    mask_kaggle_tr, mask_kaggle_val, tg_kaggle_tr, tg_kaggle_val, \
-    tgt_kaggle_tr, tgt_kaggle_val = train_test_split(
-        X_kaggle, kaggle_offset, kaggle_masks,
-        kaggle_target_gain, kaggle_target_gain_tilt,
-        test_size=TEST_SIZE, random_state=RANDOM_STATE
+    kaggle_loaders = create_dataloaders(
+        X_kaggle, y_offset_kaggle, tg_kaggle, tgt_kaggle, mask_kaggle,
+        FINETUNE_BATCH_SIZE, TEST_SIZE, RANDOM_STATE, device
     )
+    kaggle_train_loader, kaggle_val_loader, kaggle_val_data = kaggle_loaders
+    X_k_val, y_offset_k_val, _, _, mask_k_val = kaggle_val_data
 
-    kaggle_train_dataset = OFCDataset(X_kaggle_tr, y_kaggle_tr, tg_kaggle_tr, tgt_kaggle_tr, mask_kaggle_tr)
-    kaggle_val_dataset = OFCDataset(X_kaggle_val, y_kaggle_val, tg_kaggle_val, tgt_kaggle_val, mask_kaggle_val)
-
-    kaggle_train_loader = DataLoader(
-        kaggle_train_dataset, 
-        batch_size=FINETUNE_BATCH_SIZE, 
-        shuffle=True,
-        num_workers=num_workers,
-        pin_memory=pin_memory
-    )
-    kaggle_val_loader = DataLoader(
-        kaggle_val_dataset, 
-        batch_size=FINETUNE_BATCH_SIZE, 
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=pin_memory
-    )
-
-    input_dim = X_cosmos.shape[1]
-    output_dim = y_cosmos.shape[1]
-
+    # -------------------------------------------------------------------------
+    # 2. Model Initialization
+    # -------------------------------------------------------------------------
     model = HybridFNOKANPredictor(
-        input_dim=input_dim,
-        output_dim=output_dim,
+        input_dim=X_cosmos.shape[1],
+        output_dim=y_offset_cosmos.shape[1],
         hidden_dims=HYBRID_FNO_KAN_HIDDEN_DIMS,
         dropout=HYBRID_FNO_KAN_DROPOUT,
         use_residual=True,
@@ -544,131 +287,86 @@ def train_model_two_stage(
         use_spectral_mixing=HYBRID_FNO_KAN_USE_SPECTRAL_MIXING,
     ).to(device)
 
-    total_params = sum(p.numel() for p in model.parameters())
-    print(f"\nModel parameters: {total_params:,}")
+    print(f"\nModel Params: {sum(p.numel() for p in model.parameters()):,}")
+    trainer = Trainer(model, device, use_amp=USE_MIXED_PRECISION)
 
+    # -------------------------------------------------------------------------
+    # 3. Stage 1: Pretraining (COSMOS)
+    # -------------------------------------------------------------------------
     pretrain_loss = None
+    run_pretraining = True
 
     if LOAD_PRETRAINED_MODEL and PRETRAIN_MODEL_PATH.exists():
-        print("\n" + "="*80)
-        print(f"LOADING PRETRAINED MODEL FROM: {PRETRAIN_MODEL_PATH}")
-        print("="*80)
-
         try:
+            print(f"\n[Pretrain] Loading model from {PRETRAIN_MODEL_PATH}")
             checkpoint = torch.load(PRETRAIN_MODEL_PATH, map_location=device)
             model.load_state_dict(checkpoint['model_state_dict'])
-            pretrain_loss = checkpoint.get('pretrain_loss', None)
-
-            print(f"✓ Successfully loaded pretrained model!")
-            if pretrain_loss:
-                print(f"  Previous pretrain validation loss: {pretrain_loss:.6f}")
-            print(f"  Model type: {checkpoint.get('model_type', 'unknown')}")
-            print(f"  Input dim: {checkpoint.get('input_dim', 'unknown')}")
-            print(f"  Output dim: {checkpoint.get('output_dim', 'unknown')}")
-            print("\nSkipping Stage 1 (pretraining) and going directly to Stage 2 (finetuning)...")
-
+            pretrain_loss = checkpoint.get('pretrain_loss')
+            run_pretraining = False
+            print("✓ Pretrained model loaded.")
         except Exception as e:
-            print(f"✗ Failed to load pretrained model: {e}")
-            print("Will perform full two-stage training from scratch...")
+            print(f"✗ Failed to load model: {e}. Retraining...")
 
-            model, pretrain_loss = _train_one_stage(
-                model=model,
-                train_loader=cosmos_train_loader,
-                val_loader=cosmos_val_loader,
-                device=device,
-                learning_rate=PRETRAIN_LEARNING_RATE,
-                weight_decay=PRETRAIN_WEIGHT_DECAY,
-                epochs=PRETRAIN_EPOCHS,
-                patience=PRETRAIN_EARLY_STOPPING_PATIENCE,
-                stage_name="STAGE 1: PRETRAINING ON COSMOS",
-                val_every_n_epochs=PRETRAIN_VAL_EVERY_N_EPOCHS
-            )
-
-            PRETRAIN_MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
-            torch.save({
-                'model_state_dict': model.state_dict(),
-                'model_type': 'hybrid_fno_kan',
-                'input_dim': input_dim,
-                'output_dim': output_dim,
-                'pretrain_loss': pretrain_loss,
-            }, PRETRAIN_MODEL_PATH)
-            print(f"\nPretrained model saved to: {PRETRAIN_MODEL_PATH}")
-
-    else:
-        if LOAD_PRETRAINED_MODEL:
-            print(f"\n⚠ Pretrained model not found at: {PRETRAIN_MODEL_PATH}")
-            print("Will perform full two-stage training from scratch...")
-
-        model, pretrain_loss = _train_one_stage(
-            model=model,
-            train_loader=cosmos_train_loader,
-            val_loader=cosmos_val_loader,
-            device=device,
-            learning_rate=PRETRAIN_LEARNING_RATE,
-            weight_decay=PRETRAIN_WEIGHT_DECAY,
-            epochs=PRETRAIN_EPOCHS,
-            patience=PRETRAIN_EARLY_STOPPING_PATIENCE,
-            stage_name="STAGE 1: PRETRAINING ON COSMOS",
-            val_every_n_epochs=PRETRAIN_VAL_EVERY_N_EPOCHS
+    if run_pretraining:
+        optimizer = optim.Adam(model.parameters(), lr=PRETRAIN_LEARNING_RATE, weight_decay=PRETRAIN_WEIGHT_DECAY)
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=15)
+        
+        pretrain_loss = trainer.fit(
+            cosmos_train_loader, cosmos_val_loader, optimizer,
+            epochs=PRETRAIN_EPOCHS, patience=PRETRAIN_EARLY_STOPPING_PATIENCE,
+            scheduler=scheduler, val_every_n=PRETRAIN_VAL_EVERY_N_EPOCHS,
+            title="Stage 1: Pretraining (COSMOS)"
         )
-
+        
+        # Save Pretrained Model
         PRETRAIN_MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
         torch.save({
             'model_state_dict': model.state_dict(),
-            'model_type': 'hybrid_fno_kan',
-            'input_dim': input_dim,
-            'output_dim': output_dim,
             'pretrain_loss': pretrain_loss,
+            'input_dim': X_cosmos.shape[1],
+            'output_dim': y_offset_cosmos.shape[1]
         }, PRETRAIN_MODEL_PATH)
-        print(f"\nPretrained model saved to: {PRETRAIN_MODEL_PATH}")
+        print(f"Pretrained model saved to {PRETRAIN_MODEL_PATH}")
 
-    model, finetune_loss = _train_discriminative_finetune(
-        model=model,
-        train_loader=kaggle_train_loader,
-        val_loader=kaggle_val_loader,
-        device=device,
-        base_learning_rate=FINETUNE_LEARNING_RATE,
-        weight_decay=FINETUNE_WEIGHT_DECAY,
-        epochs=FINETUNE_EPOCHS,
-        patience=FINETUNE_EARLY_STOPPING_PATIENCE
+    # -------------------------------------------------------------------------
+    # 4. Stage 2: Finetuning (Kaggle)
+    # -------------------------------------------------------------------------
+    print("\n[Finetune] Starting finetuning...")
+    optimizer_ft = optim.AdamW(model.parameters(), lr=FINETUNE_LEARNING_RATE, weight_decay=FINETUNE_WEIGHT_DECAY)
+    
+    finetune_loss = trainer.fit(
+        kaggle_train_loader, kaggle_val_loader, optimizer_ft,
+        epochs=FINETUNE_EPOCHS, patience=FINETUNE_EARLY_STOPPING_PATIENCE,
+        title="Stage 2: Finetuning (Kaggle)"
     )
 
+    # -------------------------------------------------------------------------
+    # 5. Final Evaluation
+    # -------------------------------------------------------------------------
     print("\n" + "="*80)
-    print("FINAL EVALUATION ON KAGGLE VALIDATION SET")
+    print("FINAL EVALUATION")
     print("="*80)
-
+    
     wrapper = PyTorchModelWrapper(model, device)
-    y_pred = wrapper.predict(X_kaggle_val, tg_kaggle_val, tgt_kaggle_val, mask_kaggle_val)
-
-    y_pred_masked = y_pred * mask_kaggle_val
-
-    y_val_denorm = y_kaggle_val + np.array([
-        compute_baseline_gain(tg, tgt)
-        for tg, tgt in zip(tg_kaggle_val, tgt_kaggle_val)
-    ])
-    y_val_masked = y_val_denorm * mask_kaggle_val
-
-    non_zero_mask = mask_kaggle_val > 0
-    mse = mean_squared_error(y_val_masked[non_zero_mask], y_pred_masked[non_zero_mask])
-    mae = mean_absolute_error(y_val_masked[non_zero_mask], y_pred_masked[non_zero_mask])
+    
+    # Calculate metrics on Kaggle validation set
+    y_pred_offset = model(torch.FloatTensor(X_k_val).to(device), torch.FloatTensor(mask_k_val).to(device))
+    y_pred_offset = y_pred_offset.detach().cpu().numpy()
+    
+    y_pred_masked = y_pred_offset * mask_k_val
+    y_true_masked = y_offset_k_val * mask_k_val
+    
+    non_zero = mask_k_val > 0
+    mse = mean_squared_error(y_true_masked[non_zero], y_pred_masked[non_zero])
+    mae = mean_absolute_error(y_true_masked[non_zero], y_pred_masked[non_zero])
     rmse = np.sqrt(mse)
-
-    print(f"Final Validation MSE: {mse:.6f}")
-    print(f"Final Validation RMSE: {rmse:.6f}")
-    print(f"Final Validation MAE: {mae:.6f}")
-
-    print(f"\nPrediction statistics (non-zero only):")
-    non_zero_preds = y_pred_masked[non_zero_mask]
-    print(f"  Mean: {non_zero_preds.mean():.4f}")
-    print(f"  Std: {non_zero_preds.std():.4f}")
-    print(f"  Min: {non_zero_preds.min():.4f}")
-    print(f"  Max: {non_zero_preds.max():.4f}")
-    print(f"  Count: {non_zero_preds.size}")
+    
+    print(f"Validation MSE: {mse:.6f}")
+    print(f"Validation RMSE: {rmse:.6f}")
+    print(f"Validation MAE: {mae:.6f}")
 
     metrics = {
-        "mse": mse,
-        "mae": mae,
-        "rmse": rmse,
+        "mse": mse, "mae": mae, "rmse": rmse,
         "pretrain_loss": pretrain_loss,
         "finetune_loss": finetune_loss
     }

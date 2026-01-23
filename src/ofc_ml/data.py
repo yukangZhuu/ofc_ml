@@ -102,7 +102,6 @@ def load_data():
         print(f"Error loading data: {e}")
         raise
 
-
 def load_data_separate():
     """
     分别加载 COSMOS 和 Kaggle 数据集，用于两阶段训练。

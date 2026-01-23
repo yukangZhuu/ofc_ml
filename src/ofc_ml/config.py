@@ -20,7 +20,7 @@ OUTPUT_CONFIG = {
 }
 
 FEATURE_CONFIG = {
-    "USE_MASK": "multiply", # concat, multiply, none
+    "USE_MASK": "none", # concat, multiply, none
 }
 
 MODEL_CONFIG = {
@@ -34,7 +34,7 @@ MODEL_CONFIG = {
 TRAINING_CONFIG = {
     "DEVICE": "cuda",
     "LOAD_PRETRAINED_MODEL": True,
-    "PRETRAIN_MODEL_PATH": PROJECT_ROOT / "models" / "pretrained_model_zyk_0123_01_multiply.pt",
+    "PRETRAIN_MODEL_PATH": PROJECT_ROOT / "models" / "pretrained_model_zyk_0123_01_none.pt",
     "USE_MIXED_PRECISION": False,  # 关闭混合精度（FP16）- 在此模型上反而变慢
 }
 
