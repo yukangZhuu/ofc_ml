@@ -5,14 +5,49 @@ import numpy as np
 import time
 from pathlib import Path
 import sys
+import os
 from torch.utils.data import DataLoader, TensorDataset
 
-REPO_ROOT = Path(__file__).resolve().parent
+# 获取脚本所在目录的父目录（项目根目录）
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPT_DIR.parent
 SRC_DIR = REPO_ROOT / "src"
+
+# 添加src目录到Python路径
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from ofc_ml.network import HybridFNOKANPredictor, MaskedMSELoss
+# 打印路径信息用于调试
+print(f"Script dir: {SCRIPT_DIR}")
+print(f"Repo root: {REPO_ROOT}")
+print(f"Src dir: {SRC_DIR}")
+print(f"Python path includes src: {str(SRC_DIR) in sys.path}")
+print(f"Current working dir: {os.getcwd()}")
+print()
+
+# 尝试导入
+try:
+    from ofc_ml.network import HybridFNOKANPredictor, MaskedMSELoss
+    print("✅ Successfully imported modules")
+except ImportError as e:
+    print(f"❌ Failed to import: {e}")
+    print(f"Trying alternative import method...")
+    
+    # 尝试直接导入network模块
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("network", SRC_DIR / "ofc_ml" / "network.py")
+        network_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(network_module)
+        HybridFNOKANPredictor = network_module.HybridFNOKANPredictor
+        MaskedMSELoss = network_module.MaskedMSELoss
+        print("✅ Successfully imported using importlib")
+    except Exception as e2:
+        print(f"❌ Alternative import also failed: {e2}")
+        print("\nPlease run this script from project root directory:")
+        print(f"  cd {REPO_ROOT}")
+        print(f"  python scripts/test_training_speed.py")
+        sys.exit(1)
 
 def test_training_speed():
     print("="*80)
