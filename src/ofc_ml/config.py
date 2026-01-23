@@ -1,99 +1,93 @@
 from pathlib import Path
-from datetime import datetime
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
-DATA_DIR = PROJECT_ROOT / "data" / "ofc-2026-ml-challenge"
-TRAIN_FEATURES_PATH = DATA_DIR / "train_features_clean.csv"
-TRAIN_LABELS_PATH = DATA_DIR / "train_labels_clean.csv"
-TEST_FEATURES_PATH = DATA_DIR / "test_features.csv"
-EXAMPLE_SUBMISSION_PATH = DATA_DIR / "example_submission.csv"
+DATASET_CONFIG = {
+    "DATA_DIR": PROJECT_ROOT / "data" / "ofc-2026-ml-challenge",
+    "TRAIN_FEATURES_PATH": PROJECT_ROOT / "data" / "ofc-2026-ml-challenge" / "train_features_clean.csv",
+    "TRAIN_LABELS_PATH": PROJECT_ROOT / "data" / "ofc-2026-ml-challenge" / "train_labels_clean.csv",
+    "TEST_FEATURES_PATH": PROJECT_ROOT / "data" / "ofc-2026-ml-challenge" / "test_features.csv",
+    "COSMOS_DATA_DIR": PROJECT_ROOT / "data" / "cosmos-as-kaggle",
+    "COSMOS_TRAIN_FEATURES_PATH": PROJECT_ROOT / "data" / "cosmos-as-kaggle" / "train_features.csv",
+    "COSMOS_TRAIN_LABELS_PATH": PROJECT_ROOT / "data" / "cosmos-as-kaggle" / "train_labels.csv",
+    "DATASET_USE": "both",
+    "RANDOM_STATE": 42,
+    "TEST_SIZE": 0.05,
+}
 
-# Dataset switch:
-# - "kaggle": use TRAIN_FEATURES_PATH/TRAIN_LABELS_PATH (clean kaggle train)
-# - "cosmos": use COSMOS_TRAIN_* as training data
-# - "both": concatenate kaggle train + cosmos train for training
-DATASET_USE = "both"  # one of: {"kaggle", "cosmos", "both"}
+OUTPUT_CONFIG = {
+    "SUBMISSION_DIR": PROJECT_ROOT / "submissions",
+}
 
-# External cosmos-as-kaggle dataset (same schema as kaggle train)
-# This can either be a directory containing train_features.csv/train_labels.csv directly,
-# or a directory containing multiple subfolders each with those two files (e.g. by gain).
-COSMOS_DATA_DIR = PROJECT_ROOT / "data" / "cosmos-as-kaggle"
-COSMOS_TRAIN_FEATURES_PATH = COSMOS_DATA_DIR / "train_features.csv"  # optional (may not exist)
-COSMOS_TRAIN_LABELS_PATH = COSMOS_DATA_DIR / "train_labels.csv"      # optional (may not exist)
+FEATURE_CONFIG = {
+    "USE_MASK": "multiply", # concat, multiply, none
+}
 
-SUBMISSION_DIR = PROJECT_ROOT / "submissions"
-SUBMISSION_PATH = PROJECT_ROOT / "submission.csv"
+MODEL_CONFIG = {
+    "DROPOUT": 0.2,
+    "HIDDEN_DIMS": [256, 256, 128, 128, 128],
+    "N_FREQUENCIES": 4,
+    "SPECTRAL_FREQ_RATIO": 0.5,
+    "USE_SPECTRAL_MIXING": True,
+}
 
-RANDOM_STATE = 42
-TEST_SIZE = 0.05
+TRAINING_CONFIG = {
+    "DEVICE": "cuda",
+    "LOAD_PRETRAINED_MODEL": True,
+    "PRETRAIN_MODEL_PATH": PROJECT_ROOT / "models" / "pretrained_model_zyk_0123_01_multiply.pt",
+}
 
-WANDB_PROJECT = "ofc-2026-ml-challenge"
-WANDB_ENTITY = None
-WANDB_MODE = "offline"
+PRETRAIN_CONFIG = {
+    "LEARNING_RATE": 0.001,
+    "WEIGHT_DECAY": 1e-4,
+    "BATCH_SIZE": 128,
+    "EPOCHS": 500,
+    "EARLY_STOPPING_PATIENCE": 40,
+}
 
-# Model selection
-# - "mlp": SimpleGainPredictor (MLP)
-# - "fourier_kan": FourierKANGainPredictor (FourierKAN blocks), typically deeper
-# - "hybrid_fno_kan": HybridFNOKANPredictor (FNO + FourierKAN 混合架构)
-MODEL_TYPE = "hybrid_fno_kan"
+FINETUNE_CONFIG = {
+    "LEARNING_RATE": 0.0002,
+    "WEIGHT_DECAY": 5e-5,
+    "BATCH_SIZE": 32,
+    "EPOCHS": 500,
+    "EARLY_STOPPING_PATIENCE": 60,
+    "DISCRIMINATIVE_LR_DECAY": 0.95,
+}
 
-DROPOUT = 0.2
-HIDDEN_DIMS = [128, 256, 128]
+DATA_DIR = DATASET_CONFIG["DATA_DIR"]
+TRAIN_FEATURES_PATH = DATASET_CONFIG["TRAIN_FEATURES_PATH"]
+TRAIN_LABELS_PATH = DATASET_CONFIG["TRAIN_LABELS_PATH"]
+TEST_FEATURES_PATH = DATASET_CONFIG["TEST_FEATURES_PATH"]
+COSMOS_DATA_DIR = DATASET_CONFIG["COSMOS_DATA_DIR"]
+COSMOS_TRAIN_FEATURES_PATH = DATASET_CONFIG["COSMOS_TRAIN_FEATURES_PATH"]
+COSMOS_TRAIN_LABELS_PATH = DATASET_CONFIG["COSMOS_TRAIN_LABELS_PATH"]
+DATASET_USE = DATASET_CONFIG["DATASET_USE"]
+RANDOM_STATE = DATASET_CONFIG["RANDOM_STATE"]
+TEST_SIZE = DATASET_CONFIG["TEST_SIZE"]
 
-# FourierKAN hyperparameters
-FOURIER_KAN_DROPOUT = 0.2
-# Deeper by default (you can tune)
-FOURIER_KAN_HIDDEN_DIMS = [256, 256, 128, 128, 64]
-# Number of Fourier frequencies used inside each FourierKANLayer
-FOURIER_KAN_N_FREQUENCIES = 4
-# Let the model see activation pattern (mask) by concatenating it to input features.
-FOURIER_KAN_CONCAT_MASK_INPUT = True
+SUBMISSION_DIR = OUTPUT_CONFIG["SUBMISSION_DIR"]
 
-# Hybrid FNO+KAN hyperparameters
-HYBRID_FNO_KAN_DROPOUT = 0.2
-HYBRID_FNO_KAN_HIDDEN_DIMS = [256, 256, 128, 128, 128]
-HYBRID_FNO_KAN_N_FREQUENCIES = 4
-HYBRID_FNO_KAN_SPECTRAL_FREQ_RATIO = 0.5  # 频域保留的频率比例（0-1），0.5表示保留低50%频率，确保各层物理意义一致
-HYBRID_FNO_KAN_USE_SPECTRAL_MIXING = True  # 是否使用频域混合层
-HYBRID_FNO_KAN_CONCAT_MASK_INPUT = True
+USE_MASK = FEATURE_CONFIG["USE_MASK"]
 
-# Backward-compatible aliases (old SimpleKAN naming)
-SIMPLE_KAN_DROPOUT = FOURIER_KAN_DROPOUT
-SIMPLE_KAN_HIDDEN_DIMS = FOURIER_KAN_HIDDEN_DIMS
-SIMPLE_KAN_CONCAT_MASK_INPUT = FOURIER_KAN_CONCAT_MASK_INPUT
-LEARNING_RATE = 0.0005
-WEIGHT_DECAY = 1e-4
-BATCH_SIZE = 64
-EARLY_STOPPING_PATIENCE = 60
+HYBRID_FNO_KAN_DROPOUT = MODEL_CONFIG["DROPOUT"]
+HYBRID_FNO_KAN_HIDDEN_DIMS = MODEL_CONFIG["HIDDEN_DIMS"]
+HYBRID_FNO_KAN_N_FREQUENCIES = MODEL_CONFIG["N_FREQUENCIES"]
+HYBRID_FNO_KAN_SPECTRAL_FREQ_RATIO = MODEL_CONFIG["SPECTRAL_FREQ_RATIO"]
+HYBRID_FNO_KAN_USE_SPECTRAL_MIXING = MODEL_CONFIG["USE_SPECTRAL_MIXING"]
 
-# Training device: "cpu", "cuda", or "cuda:N" (e.g. "cuda:2")
-DEVICE = "cuda"
-# Two-stage training (pretrain + finetune)
-USE_TWO_STAGE_TRAINING = True  # 是否使用两阶段训练
+DEVICE = TRAINING_CONFIG["DEVICE"]
+LOAD_PRETRAINED_MODEL = TRAINING_CONFIG["LOAD_PRETRAINED_MODEL"]
+PRETRAIN_MODEL_PATH = TRAINING_CONFIG["PRETRAIN_MODEL_PATH"]
 
-# 是否从已有的预训练模型加载并跳过预训练阶段
-# 如果为 True 且 PRETRAIN_MODEL_PATH 存在，则直接加载预训练模型并开始微调
-LOAD_PRETRAINED_MODEL = True  # 如果预训练模型存在，直接加载
+PRETRAIN_LEARNING_RATE = PRETRAIN_CONFIG["LEARNING_RATE"]
+PRETRAIN_WEIGHT_DECAY = PRETRAIN_CONFIG["WEIGHT_DECAY"]
+PRETRAIN_BATCH_SIZE = PRETRAIN_CONFIG["BATCH_SIZE"]
+PRETRAIN_EPOCHS = PRETRAIN_CONFIG["EPOCHS"]
+PRETRAIN_EARLY_STOPPING_PATIENCE = PRETRAIN_CONFIG["EARLY_STOPPING_PATIENCE"]
 
-# Stage 1: Pretrain on COSMOS dataset
-PRETRAIN_LEARNING_RATE = 0.001  # 预训练学习率（可以稍大）
-PRETRAIN_WEIGHT_DECAY = 1e-4
-PRETRAIN_BATCH_SIZE = 64
-PRETRAIN_EPOCHS = 500
-PRETRAIN_EARLY_STOPPING_PATIENCE = 50
-
-# Stage 2: Finetune on Kaggle dataset
-FINETUNE_LEARNING_RATE = 0.0002  # 微调学习率（通常更小）
-FINETUNE_WEIGHT_DECAY = 5e-5
-FINETUNE_BATCH_SIZE = 32  # 微调可以用更小的batch size
-FINETUNE_EPOCHS = 1000
-FINETUNE_EARLY_STOPPING_PATIENCE = 50
-
-# ==================== Discriminative Fine-tuning 策略 ====================
-# 判别式微调：不同层使用不同学习率（底层小学习率，顶层大学习率）
-DISCRIMINATIVE_LR_DECAY = 0.95  # 每往底层走一层，学习率衰减因子（0.95表示每层学习率是上一层的95%）
-# 例如：顶层 lr=0.0004, 下一层 lr=0.0004*0.95, 再下一层 lr=0.0004*0.95^2
-
-# Model checkpoint path
-PRETRAIN_MODEL_PATH = PROJECT_ROOT / "models" / "pretrained_model0122.pt"
+FINETUNE_LEARNING_RATE = FINETUNE_CONFIG["LEARNING_RATE"]
+FINETUNE_WEIGHT_DECAY = FINETUNE_CONFIG["WEIGHT_DECAY"]
+FINETUNE_BATCH_SIZE = FINETUNE_CONFIG["BATCH_SIZE"]
+FINETUNE_EPOCHS = FINETUNE_CONFIG["EPOCHS"]
+FINETUNE_EARLY_STOPPING_PATIENCE = FINETUNE_CONFIG["EARLY_STOPPING_PATIENCE"]
+DISCRIMINATIVE_LR_DECAY = FINETUNE_CONFIG["DISCRIMINATIVE_LR_DECAY"]
