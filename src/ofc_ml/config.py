@@ -35,7 +35,7 @@ TRAINING_CONFIG = {
     "DEVICE": "cuda",
     "LOAD_PRETRAINED_MODEL": True,
     "PRETRAIN_MODEL_PATH": PROJECT_ROOT / "models" / "pretrained_model_zyk_0123_01_multiply.pt",
-    "USE_MIXED_PRECISION": True,  # 使用混合精度训练（FP16）
+    "USE_MIXED_PRECISION": False,  # 关闭混合精度（FP16）- 在此模型上反而变慢
 }
 
 PRETRAIN_CONFIG = {
