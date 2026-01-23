@@ -261,6 +261,8 @@ def _train_one_stage(
 
         train_pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} [Train]", leave=False)
         batch_times = []
+        total_train_masks = 0.0
+        
         for inputs, targets, target_gain, target_gain_tilt, masks in train_pbar:
             batch_start = time.time()
             
@@ -278,6 +280,7 @@ def _train_one_stage(
             optimizer.step()
 
             train_loss += loss.item() * masks.sum().item()
+            total_train_masks += masks.sum().item()
             
             batch_time = time.time() - batch_start
             batch_times.append(batch_time)
@@ -297,11 +300,12 @@ def _train_one_stage(
             print(f"    GPU Memory used: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB")
             torch.cuda.reset_peak_memory_stats()
 
-        total_train_masks = sum(masks.sum().item() for _, _, _, _, masks in train_loader)
         train_loss /= total_train_masks
 
         model.eval()
         val_loss = 0.0
+        total_val_masks = 0.0
+        
         with torch.no_grad():
             val_pbar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} [Val]", leave=False)
             for inputs, targets, target_gain, target_gain_tilt, masks in val_pbar:
@@ -312,10 +316,10 @@ def _train_one_stage(
                 outputs = model(inputs, masks)
                 loss = criterion(outputs, targets, masks)
                 val_loss += loss.item() * masks.sum().item()
+                total_val_masks += masks.sum().item()
 
                 val_pbar.set_postfix({'loss': f'{loss.item():.6f}'})
 
-        total_val_masks = sum(masks.sum().item() for _, _, _, _, masks in val_loader)
         val_loss /= total_val_masks
 
         current_lr = optimizer.param_groups[0]['lr']
