@@ -249,13 +249,21 @@ def _train_one_stage(
 
     training_start_time = time.time()
     epoch_start_time = time.time()
+    
+    if device.type == 'cuda':
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
+        print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
 
     for epoch in tqdm(range(epochs), desc=f"{stage_name} Progress", unit="epoch"):
+        epoch_start_time = time.time()
         model.train()
         train_loss = 0.0
 
         train_pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} [Train]", leave=False)
+        batch_times = []
         for inputs, targets, target_gain, target_gain_tilt, masks in train_pbar:
+            batch_start = time.time()
+            
             inputs, targets, target_gain, target_gain_tilt, masks = \
                 inputs.to(device), targets.to(device), target_gain.to(device), \
                 target_gain_tilt.to(device), masks.to(device)
@@ -270,8 +278,24 @@ def _train_one_stage(
             optimizer.step()
 
             train_loss += loss.item() * masks.sum().item()
+            
+            batch_time = time.time() - batch_start
+            batch_times.append(batch_time)
 
-            train_pbar.set_postfix({'loss': f'{loss.item():.6f}'})
+            train_pbar.set_postfix({
+                'loss': f'{loss.item():.6f}',
+                'batch_time': f'{batch_time*1000:.1f}ms'
+            })
+        
+        avg_batch_time = np.mean(batch_times) if batch_times else 0
+        samples_per_sec = len(train_loader.dataset) / (sum(batch_times) if batch_times else 1)
+        
+        if device.type == 'cuda' and epoch == 0:
+            print(f"  First epoch stats:")
+            print(f"    Avg batch time: {avg_batch_time*1000:.1f}ms")
+            print(f"    Samples/sec: {samples_per_sec:.1f}")
+            print(f"    GPU Memory used: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB")
+            torch.cuda.reset_peak_memory_stats()
 
         total_train_masks = sum(masks.sum().item() for _, _, _, _, masks in train_loader)
         train_loss /= total_train_masks
@@ -353,6 +377,13 @@ def train_model_two_stage(
 
     device = torch.device(str(DEVICE)) if torch.cuda.is_available() else torch.device("cpu")
     print(f"Using device: {device}")
+    
+    if device.type == 'cuda':
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
+        print(f"CUDA Version: {torch.version.cuda}")
+        print(f"cuDNN Version: {torch.backends.cudnn.version()}")
+        print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
+        print(f"GPU Memory Free: {torch.cuda.memory_allocated(0) / 1024**3:.2f} GB")
 
     print("\n[Stage 1] Preparing COSMOS dataset for pretraining...")
 
@@ -386,8 +417,23 @@ def train_model_two_stage(
     cosmos_train_dataset = OFCDataset(X_cosmos_tr, y_cosmos_tr, tg_cosmos_tr, tgt_cosmos_tr, mask_cosmos_tr)
     cosmos_val_dataset = OFCDataset(X_cosmos_val, y_cosmos_val, tg_cosmos_val, tgt_cosmos_val, mask_cosmos_val)
 
-    cosmos_train_loader = DataLoader(cosmos_train_dataset, batch_size=PRETRAIN_BATCH_SIZE, shuffle=True)
-    cosmos_val_loader = DataLoader(cosmos_val_dataset, batch_size=PRETRAIN_BATCH_SIZE, shuffle=False)
+    num_workers = 4 if device.type == 'cuda' else 0
+    pin_memory = device.type == 'cuda'
+    
+    cosmos_train_loader = DataLoader(
+        cosmos_train_dataset, 
+        batch_size=PRETRAIN_BATCH_SIZE, 
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=pin_memory
+    )
+    cosmos_val_loader = DataLoader(
+        cosmos_val_dataset, 
+        batch_size=PRETRAIN_BATCH_SIZE, 
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=pin_memory
+    )
 
     print("\n[Stage 2] Preparing Kaggle dataset for finetuning...")
 
@@ -419,8 +465,20 @@ def train_model_two_stage(
     kaggle_train_dataset = OFCDataset(X_kaggle_tr, y_kaggle_tr, tg_kaggle_tr, tgt_kaggle_tr, mask_kaggle_tr)
     kaggle_val_dataset = OFCDataset(X_kaggle_val, y_kaggle_val, tg_kaggle_val, tgt_kaggle_val, mask_kaggle_val)
 
-    kaggle_train_loader = DataLoader(kaggle_train_dataset, batch_size=FINETUNE_BATCH_SIZE, shuffle=True)
-    kaggle_val_loader = DataLoader(kaggle_val_dataset, batch_size=FINETUNE_BATCH_SIZE, shuffle=False)
+    kaggle_train_loader = DataLoader(
+        kaggle_train_dataset, 
+        batch_size=FINETUNE_BATCH_SIZE, 
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=pin_memory
+    )
+    kaggle_val_loader = DataLoader(
+        kaggle_val_dataset, 
+        batch_size=FINETUNE_BATCH_SIZE, 
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=pin_memory
+    )
 
     input_dim = X_cosmos.shape[1]
     output_dim = y_cosmos.shape[1]
