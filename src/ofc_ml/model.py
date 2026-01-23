@@ -332,7 +332,13 @@ def train_model_two_stage(
     1. Pretrain on COSMOS dataset.
     2. Discriminative Finetune on Kaggle dataset.
     """
-    device = torch.device(str(DEVICE)) if torch.cuda.is_available() else torch.device("cpu")
+    # Detect Device: CUDA > MPS > CPU
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
     print(f"Using device: {device}")
 
     # -------------------------------------------------------------------------
