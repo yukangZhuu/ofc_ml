@@ -11,10 +11,10 @@ def get_feature_columns(df):
     num_cols = ['target_gain', 'target_gain_tilt', 'EDFA_input_power_total', 'EDFA_output_power_total']
     
     spectra_cols = [c for c in df.columns if 'EDFA_input_spectra_' in c]
-    spectra_cols.sort()
+    mask_cols = [c for c in df.columns if 'DUT_WSS_activated_channel_index' in c]
     
-    mask_cols = [c for c in df.columns if 'DUT_WSS_activated_channel_index_' in c]
-    mask_cols.sort()
+    spectra_cols.sort(key=lambda x: int(x.split('_')[-1]))
+    mask_cols.sort(key=lambda x: int(x.split('_')[-1]))
     
     return cat_cols, num_cols, spectra_cols, mask_cols
 
