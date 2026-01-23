@@ -30,29 +30,40 @@ TEST_SIZE = 0.05
 
 WANDB_PROJECT = "ofc-2026-ml-challenge"
 WANDB_ENTITY = None
-WANDB_MODE = "offline"
+WANDB_MODE = "online"
 
 # Model selection
 # - "mlp": SimpleGainPredictor (MLP)
 # - "fourier_kan": FourierKANGainPredictor (FourierKAN blocks), typically deeper
 # - "hybrid_fno_kan": HybridFNOKANPredictor (FNO + FourierKAN 混合架构)
-MODEL_TYPE = "hybrid_fno_kan"
+# - "resnet_mlp": ResNetPredictor (Robust Deep MLP with Residuals)
+MODEL_TYPE = "resnet_mlp"
 
-DROPOUT = 0.2
-HIDDEN_DIMS = [128, 256, 128]
+DROPOUT = 0.1
+HIDDEN_DIMS = [512, 512, 512, 512, 256, 256]
+
+# Mask application strategy
+# - "concat": concatenate mask as additional input dimension (original approach)
+# - "multiply": multiply mask to spectral features before feeding to network (new approach)
+MASK_STRATEGY = "multiply"  # one of: {"concat", "multiply"}
+
+# ResNet-MLP hyperparameters
+RESNET_MLP_DROPOUT = 0.1
+RESNET_MLP_HIDDEN_DIMS = [512, 512, 512, 512, 256, 256]  # 6 layers, wide and deep
 
 # FourierKAN hyperparameters
 FOURIER_KAN_DROPOUT = 0.2
 # Deeper by default (you can tune)
-FOURIER_KAN_HIDDEN_DIMS = [256, 256, 128, 128, 64]
+FOURIER_KAN_HIDDEN_DIMS = [128, 128, 64] 
 # Number of Fourier frequencies used inside each FourierKANLayer
 FOURIER_KAN_N_FREQUENCIES = 4
 # Let the model see activation pattern (mask) by concatenating it to input features.
+# Deprecated: Use MASK_STRATEGY instead. This is kept for backward compatibility.
 FOURIER_KAN_CONCAT_MASK_INPUT = True
 
 # Hybrid FNO+KAN hyperparameters
 HYBRID_FNO_KAN_DROPOUT = 0.2
-HYBRID_FNO_KAN_HIDDEN_DIMS = [256, 256, 128, 128, 128]
+HYBRID_FNO_KAN_HIDDEN_DIMS = [128, 128, 64]  # 4层，保守维度
 HYBRID_FNO_KAN_N_FREQUENCIES = 4
 HYBRID_FNO_KAN_SPECTRAL_FREQ_RATIO = 0.5  # 频域保留的频率比例（0-1），0.5表示保留低50%频率，确保各层物理意义一致
 HYBRID_FNO_KAN_USE_SPECTRAL_MIXING = True  # 是否使用频域混合层
@@ -64,8 +75,8 @@ SIMPLE_KAN_HIDDEN_DIMS = FOURIER_KAN_HIDDEN_DIMS
 SIMPLE_KAN_CONCAT_MASK_INPUT = FOURIER_KAN_CONCAT_MASK_INPUT
 LEARNING_RATE = 0.0005
 WEIGHT_DECAY = 1e-4
-BATCH_SIZE = 64
-EARLY_STOPPING_PATIENCE = 60
+BATCH_SIZE = 512
+EARLY_STOPPING_PATIENCE = 50
 
 # Training device: "cpu", "cuda", or "cuda:N" (e.g. "cuda:2")
 DEVICE = "cuda"
@@ -79,7 +90,7 @@ LOAD_PRETRAINED_MODEL = True  # 如果预训练模型存在，直接加载
 # Stage 1: Pretrain on COSMOS dataset
 PRETRAIN_LEARNING_RATE = 0.001  # 预训练学习率（可以稍大）
 PRETRAIN_WEIGHT_DECAY = 1e-4
-PRETRAIN_BATCH_SIZE = 64
+PRETRAIN_BATCH_SIZE = 256
 PRETRAIN_EPOCHS = 500
 PRETRAIN_EARLY_STOPPING_PATIENCE = 50
 
@@ -95,5 +106,12 @@ FINETUNE_EARLY_STOPPING_PATIENCE = 50
 DISCRIMINATIVE_LR_DECAY = 0.95  # 每往底层走一层，学习率衰减因子（0.95表示每层学习率是上一层的95%）
 # 例如：顶层 lr=0.0004, 下一层 lr=0.0004*0.95, 再下一层 lr=0.0004*0.95^2
 
+# ==================== Layer Freezing Strategy ====================
+# Fine-tuning时冻结底层参数，只训练顶层
+# - True: 冻结除最后一层外的所有层
+# - False: 不冻结，全量微调
+FREEZE_LAYERS = True
+UNFREEZE_LAST_N_LAYERS = 2  # 仅解冻最后N层（如果是ResNet-MLP，则解冻最后N个block和输出层）
+
 # Model checkpoint path
-PRETRAIN_MODEL_PATH = PROJECT_ROOT / "models" / "pretrained_model0122.pt"
+PRETRAIN_MODEL_PATH = PROJECT_ROOT / "models" / "pretrained_model0122_zyk_02.pt"

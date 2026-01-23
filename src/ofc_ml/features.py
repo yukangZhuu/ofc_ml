@@ -17,7 +17,7 @@ def get_feature_columns(df):
     
     return cat_cols, num_cols, spectra_cols, mask_cols
 
-def create_preprocessor(num_cols, spectra_cols, cat_cols):
+def create_preprocessor(num_cols, spectra_cols, cat_cols, apply_mask_to_spectra=False):
     spectra_pipeline = Pipeline([
         # 光谱值先从 dB 转线性刻度：x_dB -> 10^(0.1 * x_dB)
         ("to_linear", FunctionTransformer(lambda x: 1e3*np.power(10.0, 0.1 * x), feature_names_out="one-to-one")),
@@ -32,19 +32,41 @@ def create_preprocessor(num_cols, spectra_cols, cat_cols):
         ],
         remainder='drop'
     )
+    
+    preprocessor.apply_mask_to_spectra = apply_mask_to_spectra
+    preprocessor.spectra_cols = spectra_cols
+    
     return preprocessor
 
-def preprocess_features(train_df, test_df):
+def preprocess_features(train_df, test_df, apply_mask_to_spectra=False):
     print("Preprocessing features...")
     
     cat_cols, num_cols, spectra_cols, mask_cols = get_feature_columns(train_df)
     
-    preprocessor = create_preprocessor(num_cols, spectra_cols, cat_cols)
+    preprocessor = create_preprocessor(num_cols, spectra_cols, cat_cols, apply_mask_to_spectra)
     
     X_train = preprocessor.fit_transform(train_df)
     
     test_df_processed = test_df.drop(columns=['ID', 'Usage'], errors='ignore')
     X_test = preprocessor.transform(test_df_processed)
+    
+    if apply_mask_to_spectra:
+        print("Applying mask to spectral features before feeding to network...")
+        
+        # Get the indices of spectral features in the transformed array
+        # ColumnTransformer preserves the order of transformers
+        spectra_start_idx = 0
+        spectra_end_idx = len(spectra_cols)
+        
+        # Apply mask to spectral features
+        train_masks = train_df[mask_cols].values
+        test_masks = test_df_processed[mask_cols].values
+        
+        # Multiply spectral features by mask
+        X_train[:, spectra_start_idx:spectra_end_idx] = X_train[:, spectra_start_idx:spectra_end_idx] * train_masks
+        X_test[:, spectra_start_idx:spectra_end_idx] = X_test[:, spectra_start_idx:spectra_end_idx] * test_masks
+        
+        print(f"  Mask applied to {len(spectra_cols)} spectral features")
     
     print(f"Feature shape: {X_train.shape}")
     print(f"  - Spectral features: {len(spectra_cols)}")

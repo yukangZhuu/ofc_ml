@@ -8,7 +8,7 @@ sys.path.append(str(Path(__file__).resolve().parent / "src"))
 
 from ofc_ml.data import load_data, load_data_separate
 from ofc_ml.features import preprocess_features
-from ofc_ml.model import train_model, train_model_two_stage
+from ofc_ml.model import train_model_two_stage
 from ofc_ml.utils import create_submission
 from ofc_ml.network import compute_baseline_gain
 from ofc_ml import config as cfg
@@ -19,6 +19,8 @@ def parse_args():
     p.add_argument("--two-stage", action="store_true", help="Use two-stage training (pretrain + finetune)")
     p.add_argument("--load-pretrained", action="store_true", help="Load pretrained model if exists (skip pretraining)")
     p.add_argument("--no-load-pretrained", action="store_true", help="Don't load pretrained model, retrain from scratch")
+    p.add_argument("--mask-strategy", choices=["concat", "multiply"], default=None, 
+                   help="Mask application strategy: 'concat' (concatenate as input dim) or 'multiply' (multiply to spectral features)")
     return p.parse_args()
 
 def main():
@@ -32,8 +34,21 @@ def main():
     elif args.no_load_pretrained:
         cfg.LOAD_PRETRAINED_MODEL = False
     
+    # 处理mask策略参数
+    if args.mask_strategy is not None:
+        cfg.MASK_STRATEGY = args.mask_strategy
+    
+    # 根据mask策略决定是否在预处理时应用mask
+    apply_mask_to_spectra = (cfg.MASK_STRATEGY.lower() == "multiply")
+    
     # 根据参数或配置决定是否使用两阶段训练
     use_two_stage = args.two_stage if args.two_stage else cfg.USE_TWO_STAGE_TRAINING
+    
+    print(f"\nMask strategy: {cfg.MASK_STRATEGY}")
+    if apply_mask_to_spectra:
+        print("  -> Will multiply mask to spectral features before feeding to network")
+    else:
+        print("  -> Will concatenate mask as additional input dimension")
     
     if use_two_stage:
         print("\n" + "="*80)
@@ -48,7 +63,7 @@ def main():
         combined_features = pd.concat([cosmos_features, kaggle_features], axis=0, ignore_index=True)
         
         # 特征预处理（只fit一次preprocessor）
-        _, X_test, mask_cols, preprocessor = preprocess_features(combined_features, test_features)
+        _, X_test, mask_cols, preprocessor = preprocess_features(combined_features, test_features, apply_mask_to_spectra)
         
         # 两阶段训练
         model, metrics = train_model_two_stage(
@@ -59,23 +74,23 @@ def main():
             mask_cols
         )
         
-    else:
-        print("\n" + "="*80)
-        print("USING SINGLE-STAGE TRAINING MODE")
-        print("="*80)
+    #else:
+        # print("\n" + "="*80)
+        # print("USING SINGLE-STAGE TRAINING MODE")
+        # print("="*80)
         
-        # 原始单阶段训练
-        train_features, train_labels, test_features = load_data()
+        # # 原始单阶段训练
+        # train_features, train_labels, test_features = load_data()
         
-        assert len(train_features) == len(train_labels)
+        # assert len(train_features) == len(train_labels)
         
-        X_train, X_test, mask_cols, preprocessor = preprocess_features(train_features, test_features)
+        # X_train, X_test, mask_cols, preprocessor = preprocess_features(train_features, test_features, apply_mask_to_spectra)
         
-        target_cols = [c for c in train_labels.columns if 'calculated_gain_spectra_' in c]
-        target_cols.sort()
-        y_train = train_labels[target_cols].values
+        # target_cols = [c for c in train_labels.columns if 'calculated_gain_spectra_' in c]
+        # target_cols.sort()
+        # y_train = train_labels[target_cols].values
         
-        model, metrics = train_model(X_train, y_train, preprocessor, train_features, mask_cols)
+        # model, metrics = train_model(X_train, y_train, preprocessor, train_features, mask_cols)
     
     # 测试集预测
     print("\n" + "="*80)

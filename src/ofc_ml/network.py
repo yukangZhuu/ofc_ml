@@ -86,6 +86,95 @@ class SimpleGainPredictor(nn.Module):
         return out
 
 
+class ResNetBlock(nn.Module):
+    def __init__(self, dim, dropout=0.1):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(dim)
+        self.linear1 = nn.Linear(dim, dim)
+        self.act = nn.GELU()
+        self.dropout = nn.Dropout(dropout)
+        self.norm2 = nn.LayerNorm(dim)
+        self.linear2 = nn.Linear(dim, dim)
+        
+        # Init weights
+        nn.init.xavier_uniform_(self.linear1.weight)
+        nn.init.constant_(self.linear1.bias, 0)
+        nn.init.xavier_uniform_(self.linear2.weight)
+        nn.init.constant_(self.linear2.bias, 0)
+
+    def forward(self, x):
+        residual = x
+        x = self.norm1(x)
+        x = self.linear1(x)
+        x = self.act(x)
+        x = self.dropout(x)
+        x = self.norm2(x)
+        x = self.linear2(x)
+        x = self.dropout(x)
+        return x + residual
+
+
+class ResNetPredictor(nn.Module):
+    """
+    ResNet-MLP Architecture:
+    - Robust deep MLP with residual connections
+    - LayerNorm for stability
+    """
+    def __init__(
+        self, 
+        input_dim, 
+        output_dim, 
+        hidden_dims=[256, 256, 256, 256], 
+        dropout=0.1
+    ):
+        super().__init__()
+        
+        # Input projection
+        self.input_proj = nn.Linear(input_dim, hidden_dims[0])
+        nn.init.xavier_uniform_(self.input_proj.weight)
+        nn.init.constant_(self.input_proj.bias, 0)
+        
+        # ResNet Blocks
+        self.blocks = nn.ModuleList()
+        for i in range(len(hidden_dims)):
+            dim = hidden_dims[i]
+            # If next layer has different dim, we need a projection (not implemented here for simplicity, 
+            # assuming hidden_dims are all same or handled by block if we wanted)
+            # For this simple ResNet, we assume constant width or handle transition carefully.
+            # Here we just use ResNetBlock which keeps dim same.
+            # If user provides different dims, we'll project between them.
+            
+            self.blocks.append(ResNetBlock(dim, dropout))
+            
+            # Transition layer if next dim is different (and not last layer)
+            if i < len(hidden_dims) - 1 and hidden_dims[i] != hidden_dims[i+1]:
+                trans = nn.Linear(hidden_dims[i], hidden_dims[i+1])
+                nn.init.xavier_uniform_(trans.weight)
+                self.blocks.append(trans)
+
+        # Output head
+        self.output_head = nn.Sequential(
+            nn.LayerNorm(hidden_dims[-1]),
+            nn.Linear(hidden_dims[-1], output_dim)
+        )
+        for m in self.output_head.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                nn.init.constant_(m.bias, 0)
+
+    def forward(self, x, mask=None):
+        x = self.input_proj(x)
+        
+        for block in self.blocks:
+            x = block(x)
+            
+        out = self.output_head(x)
+        
+        if mask is not None:
+            out = out * mask
+        return out
+
+
 class FourierKANLayer(nn.Module):
     """
     FourierKAN layer (lightweight):
