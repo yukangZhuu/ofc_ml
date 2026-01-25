@@ -4,8 +4,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 DATASET_CONFIG = {
     "DATA_DIR": PROJECT_ROOT / "data" / "ofc-2026-ml-challenge",
-    "TRAIN_FEATURES_PATH": PROJECT_ROOT / "data" / "ofc-2026-ml-challenge" / "train_features_clean.csv",
-    "TRAIN_LABELS_PATH": PROJECT_ROOT / "data" / "ofc-2026-ml-challenge" / "train_labels_clean.csv",
+    "TRAIN_FEATURES_PATH": PROJECT_ROOT / "data" / "ofc-2026-ml-challenge" / "train_features_clean_1.csv",
+    "TRAIN_LABELS_PATH": PROJECT_ROOT / "data" / "ofc-2026-ml-challenge" / "train_labels_clean_1.csv",
     "TEST_FEATURES_PATH": PROJECT_ROOT / "data" / "ofc-2026-ml-challenge" / "test_features.csv",
     "COSMOS_DATA_DIR": PROJECT_ROOT / "data" / "cosmos-as-kaggle",
     "COSMOS_TRAIN_FEATURES_PATH": PROJECT_ROOT / "data" / "cosmos-as-kaggle" / "train_features.csv",

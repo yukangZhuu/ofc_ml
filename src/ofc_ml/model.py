@@ -32,6 +32,7 @@ from .config import (
     FINETUNE_BATCH_SIZE,
     FINETUNE_EPOCHS,
     FINETUNE_EARLY_STOPPING_PATIENCE,
+    FINETUNE_VAL_EVERY_N_EPOCHS,
     PRETRAIN_MODEL_PATH,
     USE_MIXED_PRECISION,
     USE_KAGGLE_SCORE_LOSS,
@@ -454,9 +455,16 @@ def train_model_two_stage(
     
     optimizer_ft = optim.AdamW(model.parameters(), lr=FINETUNE_LEARNING_RATE, weight_decay=FINETUNE_WEIGHT_DECAY)
     
+    # Scheduler for fine-tuning to improve convergence
+    scheduler_ft = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer_ft, mode='min', factor=0.5, patience=10, min_lr=1e-7
+    )
+    
     finetune_loss = trainer_ft.fit(
         kaggle_train_loader, kaggle_val_loader, optimizer_ft,
         epochs=FINETUNE_EPOCHS, patience=FINETUNE_EARLY_STOPPING_PATIENCE,
+        scheduler=scheduler_ft,
+        val_every_n=FINETUNE_VAL_EVERY_N_EPOCHS,
         title="Stage 2: Finetuning (Kaggle)"
     )
 
