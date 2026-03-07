@@ -34,6 +34,7 @@ from .config import (
     FINETUNE_EARLY_STOPPING_PATIENCE,
     FINETUNE_VAL_EVERY_N_EPOCHS,
     PRETRAIN_MODEL_PATH,
+    FINETUNE_MODEL_PATH,
     USE_MIXED_PRECISION,
     USE_KAGGLE_SCORE_LOSS,
 )
@@ -467,6 +468,16 @@ def train_model_two_stage(
         val_every_n=FINETUNE_VAL_EVERY_N_EPOCHS,
         title="Stage 2: Finetuning (Kaggle)"
     )
+
+    # Save Finetuned Model
+    FINETUNE_MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    torch.save({
+        'model_state_dict': model.state_dict(),
+        'finetune_loss': finetune_loss,
+        'input_dim': X_kaggle.shape[1],
+        'output_dim': y_offset_kaggle.shape[1]
+    }, FINETUNE_MODEL_PATH)
+    print(f"Finetuned model saved to {FINETUNE_MODEL_PATH}")
 
     # -------------------------------------------------------------------------
     # 5. Final Evaluation
