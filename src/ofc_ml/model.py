@@ -44,8 +44,6 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error
 from sklearn.model_selection import train_test_split
 from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
-from tqdm import tqdm
-
 from . import config as cfg_legacy
 from .configs.schema import ExperimentConfig, StageConfig
 from .features import preprocess_features
@@ -222,7 +220,7 @@ class Trainer:
     def _train_epoch(self, loader: DataLoader, optimizer) -> float:
         self.model.train()
         total, denom = 0.0, 0.0
-        for batch in tqdm(loader, leave=False, desc="train"):
+        for batch in loader:
             X, y, _, _, mask = [b.to(self.device, non_blocking=True) for b in batch]
             optimizer.zero_grad(set_to_none=True)
             with autocast(device_type=self.device.type, enabled=self.scaler is not None):
