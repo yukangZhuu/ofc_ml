@@ -1,0 +1,11 @@
+base: ../../base.yaml
+name: a_a2_wo_fourier_kan
+
+# Ablation: replace FourierKAN blocks with plain MLP blocks,
+# keep SpectralMixing layers.
+model:
+  name: hybrid_fno_kan
+  use_spectral_mixing: true
+  use_fourier_kan: false
+
+stages: [pretrain, finetune]

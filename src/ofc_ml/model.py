@@ -1,325 +1,728 @@
+"""Config-driven training pipeline.
+
+Stages
+------
+- `run_pretrain(model, cfg, dataset_bundle)`   trains on COSMOS
+- `run_finetune(model, cfg, dataset_bundle)`   trains on Kaggle
+- `run_joint(model, cfg, dataset_bundle)`      trains on COSMOS ∪ Kaggle
+- `orchestrate(cfg, dataset_bundle)`           main entry point; runs the
+                                               stages listed in `cfg.stages`
+                                               in order, reusing cached
+                                               pretrain checkpoints when
+                                               possible.
+
+Each stage returns a `StageResult` with `best_loss`, `state_dict`, `history`.
+
+Losses
+------
+- `MaskedMSELoss`
+- `KaggleScoreLoss`  (kept for compatibility; selectable via stage.loss=='kaggle_score')
+
+Compatibility
+-------------
+The pre-refactor `train_model_two_stage(...)` is preserved as a thin wrapper
+over `orchestrate(...)` so `main.py` and `scripts/predict_finetuned.py` keep
+working without modification.
+"""
+
+from __future__ import annotations
+
+import copy
+import hashlib
+import json
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from torch.utils.data import DataLoader
-from torch.amp import autocast, GradScaler
+from sklearn.metrics import mean_absolute_error, mean_squared_error
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_squared_error, mean_absolute_error
-import numpy as np
-from pathlib import Path
-import time
+from torch.amp import GradScaler, autocast
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from .config import (
-    RANDOM_STATE,
-    TEST_SIZE,
-    HYBRID_FNO_KAN_DROPOUT,
-    HYBRID_FNO_KAN_HIDDEN_DIMS,
-    HYBRID_FNO_KAN_N_FREQUENCIES,
-    HYBRID_FNO_KAN_SPECTRAL_FREQ_RATIO,
-    HYBRID_FNO_KAN_USE_SPECTRAL_MIXING,
-    DEVICE,
-    LOAD_PRETRAINED_MODEL,
-    PRETRAIN_LEARNING_RATE,
-    PRETRAIN_WEIGHT_DECAY,
-    PRETRAIN_BATCH_SIZE,
-    PRETRAIN_EPOCHS,
-    PRETRAIN_EARLY_STOPPING_PATIENCE,
-    PRETRAIN_VAL_EVERY_N_EPOCHS,
-    FINETUNE_LEARNING_RATE,
-    FINETUNE_WEIGHT_DECAY,
-    FINETUNE_BATCH_SIZE,
-    FINETUNE_EPOCHS,
-    FINETUNE_EARLY_STOPPING_PATIENCE,
-    FINETUNE_VAL_EVERY_N_EPOCHS,
-    PRETRAIN_MODEL_PATH,
-    FINETUNE_MODEL_PATH,
-    USE_MIXED_PRECISION,
-    USE_KAGGLE_SCORE_LOSS,
-)
-from .network import HybridFNOKANPredictor, OFCDataset, compute_baseline_gain
+from . import config as cfg_legacy
+from .configs.schema import ExperimentConfig, StageConfig
+from .features import preprocess_features
+from .models import build_model, count_parameters
+from .network import OFCDataset, compute_baseline_gain
 
 
+# ---------------------------------------------------------------------- #
+# Device selection                                                       #
+# ---------------------------------------------------------------------- #
+def resolve_device(device_str: str = "auto") -> torch.device:
+    ds = device_str.lower().strip()
+    if ds in ("cpu",):
+        return torch.device("cpu")
+    if ds.startswith("cuda"):
+        if torch.cuda.is_available():
+            return torch.device(ds)
+        print(f"[device] Requested {ds} but CUDA unavailable; falling back to CPU.")
+        return torch.device("cpu")
+    if ds == "mps":
+        if torch.backends.mps.is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+# ---------------------------------------------------------------------- #
+# Losses                                                                 #
+# ---------------------------------------------------------------------- #
+class MaskedMSELoss(nn.Module):
+    def forward(self, predictions, targets, mask):
+        mask = mask.to(predictions.device)
+        squared = (predictions - targets) ** 2
+        masked = squared * mask
+        denom = mask.sum().clamp_min(1.0)
+        return masked.sum() / denom
+
+
+class KaggleScoreLoss(nn.Module):
+    """Differentiable approximation of the Kaggle score used for T95/Tmax-aware fine-tuning."""
+
+    def __init__(self, tau: float = 0.5, beta: float = 0.7):
+        super().__init__()
+        self.tau = tau
+        self.beta = beta
+
+    def forward(self, predictions, targets, mask):
+        diff = torch.abs(predictions - targets)
+        e = diff * mask
+        K = mask.sum(dim=1).clamp(min=1.0)
+        a_i = e.sum(dim=1) / K
+        a_bar = a_i.mean()
+        e_centered = (e - a_i.unsqueeze(1)) * mask
+        var_i = (e_centered ** 2).sum(dim=1) / K
+        s_i = torch.sqrt(var_i + 1e-12)
+        s_bar = s_i.mean()
+
+        mask_bool = mask > 0
+        all_err = e[mask_bool]
+        if all_err.numel() == 0:
+            return a_bar
+
+        sorted_err, _ = torch.sort(all_err)
+        n = sorted_err.numel()
+        idx95 = int(0.95 * n)
+        if idx95 < n:
+            p95 = sorted_err[idx95:].mean()
+        else:
+            p95 = sorted_err[-1]
+        t95 = F.relu(p95 - a_bar - self.tau)
+        emax = all_err.max()
+        t_max = F.relu(emax - p95 - self.beta)
+
+        return a_bar + 0.3 * t95 + 0.1 * t_max + 0.15 * s_bar
+
+
+def build_loss(name: str) -> nn.Module:
+    n = name.lower().strip()
+    if n == "masked_mse":
+        return MaskedMSELoss()
+    if n == "kaggle_score":
+        return KaggleScoreLoss()
+    raise ValueError(f"Unknown loss: {name!r}")
+
+
+# ---------------------------------------------------------------------- #
+# Data preparation                                                       #
+# ---------------------------------------------------------------------- #
+def prepare_offset_targets(
+    features: pd.DataFrame,
+    labels: pd.DataFrame,
+    preprocessor,
+    mask_cols: List[str],
+    target_cols: List[str],
+    predict_absolute: bool = False,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Run preprocessor and compute supervision targets.
+
+    Returns
+    -------
+    X, y_target, target_gain, target_gain_tilt, mask
+        `y_target` is either the offset (label - baseline, masked) or the raw
+        label, depending on `predict_absolute`.
+    """
+    target_gain = features["target_gain"].values
+    target_gain_tilt = features["target_gain_tilt"].values
+    mask = features[mask_cols].values
+    X = preprocessor.transform(features)
+    y_raw = labels[target_cols].values
+    if predict_absolute:
+        y_target = y_raw * mask
+    else:
+        baseline = compute_baseline_gain(target_gain, target_gain_tilt)
+        y_target = (y_raw - baseline) * mask
+    return X, y_target, target_gain, target_gain_tilt, mask
+
+
+def make_dataloaders(
+    X: np.ndarray,
+    y: np.ndarray,
+    target_gain: np.ndarray,
+    target_gain_tilt: np.ndarray,
+    mask: np.ndarray,
+    batch_size: int,
+    val_size: float,
+    random_state: int,
+    device: torch.device,
+) -> Tuple[DataLoader, DataLoader]:
+    n = len(X)
+    if n < 2 or val_size is None or val_size <= 0.0:
+        # Not enough samples for a held-out split; use everything for train,
+        # and reuse the same set for val (only used for early-stop monitoring).
+        tr = OFCDataset(X, y, target_gain, target_gain_tilt, mask)
+        val = tr
+    else:
+        X_tr, X_val, y_tr, y_val, m_tr, m_val, tg_tr, tg_val, tgt_tr, tgt_val = train_test_split(
+            X, y, mask, target_gain, target_gain_tilt,
+            test_size=val_size, random_state=random_state,
+        )
+        tr = OFCDataset(X_tr, y_tr, tg_tr, tgt_tr, m_tr)
+        val = OFCDataset(X_val, y_val, tg_val, tgt_val, m_val)
+
+    nw = 4 if device.type == "cuda" else 0
+    pin = device.type == "cuda"
+    train_loader = DataLoader(tr, batch_size=batch_size, shuffle=True,  num_workers=nw, pin_memory=pin)
+    val_loader   = DataLoader(val, batch_size=batch_size, shuffle=False, num_workers=nw, pin_memory=pin)
+    return train_loader, val_loader
+
+
+# ---------------------------------------------------------------------- #
+# Trainer                                                                #
+# ---------------------------------------------------------------------- #
+class Trainer:
+    """A small training loop with validation, scheduler, and early stopping."""
+
+    def __init__(
+        self,
+        model: nn.Module,
+        device: torch.device,
+        criterion: Optional[nn.Module] = None,
+        use_amp: bool = False,
+        grad_clip: float = 1.0,
+    ):
+        self.model = model.to(device)
+        self.device = device
+        self.criterion = criterion or MaskedMSELoss()
+        self.scaler = GradScaler() if (use_amp and device.type == "cuda") else None
+        self.grad_clip = float(grad_clip)
+
+    def _train_epoch(self, loader: DataLoader, optimizer) -> float:
+        self.model.train()
+        total, denom = 0.0, 0.0
+        for batch in tqdm(loader, leave=False, desc="train"):
+            X, y, _, _, mask = [b.to(self.device, non_blocking=True) for b in batch]
+            optimizer.zero_grad(set_to_none=True)
+            with autocast(device_type=self.device.type, enabled=self.scaler is not None):
+                preds = self.model(X, mask)
+                loss = self.criterion(preds, y, mask)
+            if self.scaler:
+                self.scaler.scale(loss).backward()
+                self.scaler.unscale_(optimizer)
+                if self.grad_clip > 0:
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+                self.scaler.step(optimizer)
+                self.scaler.update()
+            else:
+                loss.backward()
+                if self.grad_clip > 0:
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+                optimizer.step()
+            ms = float(mask.sum().item())
+            total += float(loss.item()) * ms
+            denom += ms
+        return total / max(denom, 1.0)
+
+    def _validate(self, loader: DataLoader) -> float:
+        self.model.eval()
+        total, denom = 0.0, 0.0
+        with torch.no_grad():
+            for batch in loader:
+                X, y, _, _, mask = [b.to(self.device) for b in batch]
+                with autocast(device_type=self.device.type, enabled=self.scaler is not None):
+                    preds = self.model(X, mask)
+                    loss = self.criterion(preds, y, mask)
+                ms = float(mask.sum().item())
+                total += float(loss.item()) * ms
+                denom += ms
+        return total / max(denom, 1.0)
+
+    def fit(
+        self,
+        train_loader: DataLoader,
+        val_loader: DataLoader,
+        optimizer,
+        epochs: int,
+        patience: int,
+        scheduler=None,
+        val_every_n: int = 1,
+        title: str = "training",
+    ) -> Tuple[float, List[Dict[str, float]]]:
+        print(f"\n[{title}] epochs={epochs}, patience={patience}")
+        best = float("inf")
+        best_state = None
+        bad = 0
+        history: List[Dict[str, float]] = []
+
+        for epoch in range(epochs):
+            train_loss = self._train_epoch(train_loader, optimizer)
+            if (epoch + 1) % val_every_n != 0:
+                continue
+
+            val_loss = self._validate(val_loader)
+            if scheduler is not None:
+                if isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau):
+                    scheduler.step(val_loss)
+                else:
+                    scheduler.step()
+
+            lr = optimizer.param_groups[0]["lr"]
+            print(f"  epoch {epoch+1:4d}/{epochs} train={train_loss:.6f} val={val_loss:.6f} lr={lr:.2e}")
+            history.append({"epoch": epoch + 1, "train": train_loss, "val": val_loss, "lr": lr})
+
+            if val_loss < best:
+                best = val_loss
+                best_state = copy.deepcopy(self.model.state_dict())
+                bad = 0
+            else:
+                bad += 1
+                if bad >= patience:
+                    print(f"  early stop at epoch {epoch+1}")
+                    break
+
+        if best_state is not None:
+            self.model.load_state_dict(best_state)
+        return best, history
+
+
+def build_optimizer(model: nn.Module, stage: StageConfig) -> torch.optim.Optimizer:
+    opt = stage.optimizer.lower()
+    if opt == "adam":
+        return optim.Adam(model.parameters(), lr=stage.learning_rate, weight_decay=stage.weight_decay)
+    if opt == "adamw":
+        return optim.AdamW(model.parameters(), lr=stage.learning_rate, weight_decay=stage.weight_decay)
+    raise ValueError(f"Unknown optimizer: {stage.optimizer!r}")
+
+
+def build_scheduler(optimizer: torch.optim.Optimizer, stage: StageConfig):
+    sch = stage.scheduler.lower()
+    if sch == "reduce_on_plateau":
+        return optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=10, min_lr=1e-7)
+    raise ValueError(f"Unknown scheduler: {stage.scheduler!r}")
+
+
+# ---------------------------------------------------------------------- #
+# Stage results                                                          #
+# ---------------------------------------------------------------------- #
+@dataclass
+class StageResult:
+    stage: str
+    best_loss: float
+    state_dict: Dict[str, torch.Tensor]
+    history: List[Dict[str, float]] = field(default_factory=list)
+
+
+@dataclass
+class DatasetBundle:
+    """Everything a stage needs, already preprocessed.
+
+    Produced once per experiment by `prepare_dataset_bundle` so every stage
+    shares the same preprocessor and the same per-row supervision scheme.
+    """
+    preprocessor: Any
+    mask_cols: List[str]
+    target_cols: List[str]
+    input_dim: int
+    output_dim: int
+    # Train/eval tensors per dataset
+    cosmos: Dict[str, np.ndarray]
+    kaggle: Dict[str, np.ndarray]
+    test: Dict[str, np.ndarray]
+    # Raw frames kept for downstream evaluation/submission.
+    test_features: pd.DataFrame
+    test_labels: Optional[pd.DataFrame]
+
+
+# ---------------------------------------------------------------------- #
+# Pipeline orchestration                                                 #
+# ---------------------------------------------------------------------- #
+def prepare_dataset_bundle(
+    cfg: ExperimentConfig,
+    datasets,  # LoadedDatasets (forward-declared to avoid cyclic imports)
+) -> DatasetBundle:
+    """Fit the preprocessor on COSMOS ∪ Kaggle and pack tensors for each stage."""
+    combined = pd.concat([datasets.cosmos_features, datasets.kaggle_features], axis=0, ignore_index=True)
+    _, _, mask_cols, preprocessor = preprocess_features(combined, datasets.test_features)
+
+    target_cols = sorted(
+        [c for c in datasets.cosmos_labels.columns if "calculated_gain_spectra_" in c],
+        key=lambda x: int(x.split("_")[-1]),
+    )
+
+    # Supervision targets
+    predict_absolute = cfg.model.predict_absolute
+    X_cos, y_cos, tg_cos, tgt_cos, m_cos = prepare_offset_targets(
+        datasets.cosmos_features, datasets.cosmos_labels, preprocessor,
+        mask_cols, target_cols, predict_absolute=predict_absolute,
+    )
+    X_kag, y_kag, tg_kag, tgt_kag, m_kag = prepare_offset_targets(
+        datasets.kaggle_features, datasets.kaggle_labels, preprocessor,
+        mask_cols, target_cols, predict_absolute=predict_absolute,
+    )
+    X_test = preprocessor.transform(datasets.test_features.drop(columns=["ID", "Usage"], errors="ignore"))
+
+    input_dim = X_cos.shape[1]
+    output_dim = y_cos.shape[1]
+
+    return DatasetBundle(
+        preprocessor=preprocessor,
+        mask_cols=mask_cols,
+        target_cols=target_cols,
+        input_dim=input_dim,
+        output_dim=output_dim,
+        cosmos=dict(X=X_cos, y=y_cos, tg=tg_cos, tgt=tgt_cos, mask=m_cos),
+        kaggle=dict(X=X_kag, y=y_kag, tg=tg_kag, tgt=tgt_kag, mask=m_kag),
+        test=dict(
+            X=X_test,
+            tg=datasets.test_features["target_gain"].values,
+            tgt=datasets.test_features["target_gain_tilt"].values,
+            mask=datasets.test_features[mask_cols].values,
+            ids=datasets.test_features["ID"].values,
+        ),
+        test_features=datasets.test_features,
+        test_labels=datasets.test_labels,
+    )
+
+
+def _run_stage(
+    model: nn.Module,
+    device: torch.device,
+    stage_cfg: StageConfig,
+    data: Dict[str, np.ndarray],
+    val_size: float,
+    random_state: int,
+    title: str,
+) -> StageResult:
+    if not stage_cfg.enabled:
+        raise ValueError(f"Stage '{title}' invoked but stage_cfg.enabled is False")
+    train_loader, val_loader = make_dataloaders(
+        data["X"], data["y"], data["tg"], data["tgt"], data["mask"],
+        batch_size=stage_cfg.batch_size,
+        val_size=val_size,
+        random_state=random_state,
+        device=device,
+    )
+    criterion = build_loss(stage_cfg.loss)
+    trainer = Trainer(model, device, criterion=criterion, grad_clip=stage_cfg.grad_clip)
+    optimizer = build_optimizer(model, stage_cfg)
+    scheduler = build_scheduler(optimizer, stage_cfg)
+    best, history = trainer.fit(
+        train_loader, val_loader, optimizer,
+        epochs=stage_cfg.epochs,
+        patience=stage_cfg.early_stopping_patience,
+        scheduler=scheduler,
+        val_every_n=stage_cfg.val_every_n_epochs,
+        title=title,
+    )
+    return StageResult(
+        stage=title,
+        best_loss=best,
+        state_dict={k: v.detach().cpu() for k, v in model.state_dict().items()},
+        history=history,
+    )
+
+
+def run_pretrain(model, device, cfg: ExperimentConfig, bundle: DatasetBundle) -> StageResult:
+    return _run_stage(
+        model, device, cfg.pretrain, bundle.cosmos,
+        val_size=cfg.data.val_size, random_state=cfg.data.random_state,
+        title="pretrain",
+    )
+
+
+def run_finetune(model, device, cfg: ExperimentConfig, bundle: DatasetBundle) -> StageResult:
+    return _run_stage(
+        model, device, cfg.finetune, bundle.kaggle,
+        val_size=cfg.data.val_size, random_state=cfg.data.random_state,
+        title="finetune",
+    )
+
+
+def run_joint(model, device, cfg: ExperimentConfig, bundle: DatasetBundle) -> StageResult:
+    """Train on concat(COSMOS, Kaggle) as a single stage (A-T3)."""
+    joined = {
+        k: np.concatenate([bundle.cosmos[k], bundle.kaggle[k]], axis=0)
+        for k in ("X", "y", "tg", "tgt", "mask")
+    }
+    return _run_stage(
+        model, device, cfg.joint, joined,
+        val_size=cfg.data.val_size, random_state=cfg.data.random_state,
+        title="joint",
+    )
+
+
+# ---------------------------------------------------------------------- #
+# Prediction helpers                                                     #
+# ---------------------------------------------------------------------- #
+def predict_test(
+    model: nn.Module,
+    device: torch.device,
+    bundle: DatasetBundle,
+    predict_absolute: bool = False,
+) -> np.ndarray:
+    """Return (N, 95) gain predictions aligned with bundle.test_features."""
+    model.eval()
+    X = torch.as_tensor(bundle.test["X"], dtype=torch.float32, device=device)
+    mask = torch.as_tensor(bundle.test["mask"], dtype=torch.float32, device=device)
+    # In very small-memory situations we might want to chunk; test set is 21k rows
+    # which is fine in one go on GPU.
+    with torch.no_grad():
+        pred = model(X, mask).cpu().numpy()
+    if predict_absolute:
+        out = pred
+    else:
+        baseline = compute_baseline_gain(bundle.test["tg"], bundle.test["tgt"])
+        out = baseline + pred
+    return out * bundle.test["mask"]
+
+
+def save_submission(predictions: np.ndarray, bundle: DatasetBundle, output_path: Path) -> Path:
+    target_cols = [f"calculated_gain_spectra_{i:02d}" for i in range(predictions.shape[1])]
+    df = pd.DataFrame(predictions, columns=target_cols)
+    df.insert(0, "ID", bundle.test["ids"])
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(output_path, index=False)
+    return output_path
+
+
+# ---------------------------------------------------------------------- #
+# Pretrain checkpoint cache                                              #
+# ---------------------------------------------------------------------- #
+def _arch_signature(cfg: ExperimentConfig, input_dim: int) -> str:
+    """Hash that identifies a pretrain checkpoint's reusability.
+
+    Two experiments with identical (model, pretrain stage config,
+    cosmos_ratio, seed, input_dim, preprocessor setup) share the same
+    pretrain outcome, so we can reuse a cached checkpoint.
+    """
+    key = {
+        "model": cfg.model.__dict__,
+        "pretrain": cfg.pretrain.__dict__,
+        "cosmos_ratio": cfg.data.cosmos_ratio,
+        "seed": cfg.seed,
+        "use_mask": cfg.feature.use_mask,
+        "input_dim": input_dim,
+        "predict_absolute": cfg.model.predict_absolute,
+    }
+    blob = json.dumps(key, sort_keys=True, default=str).encode()
+    return hashlib.sha1(blob).hexdigest()[:12]
+
+
+def _pretrain_cache_path(cfg: ExperimentConfig, signature: str) -> Path:
+    cache_dir = Path(cfg.results_root) / "_pretrain_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir / f"{cfg.model.name}_{signature}.pt"
+
+
+# ---------------------------------------------------------------------- #
+# Top-level orchestrator                                                 #
+# ---------------------------------------------------------------------- #
+def _load_weights_flexible(path: Path, model: nn.Module, device: torch.device) -> None:
+    """Load weights from `path` into `model`, accepting several checkpoint layouts.
+
+    Supported blobs on disk (all produced by the project):
+      - plain state_dict
+      - {"state_dict": ..., ...}           (new pretrain cache + pretrain.pt)
+      - {"model_state_dict": ..., ...}     (legacy save_pretrained_model.pt)
+    """
+    ckpt = torch.load(path, map_location=device)
+    if isinstance(ckpt, dict):
+        sd = ckpt.get("state_dict") or ckpt.get("model_state_dict")
+        if sd is None:
+            # assume the dict itself IS a state_dict (tensor values)
+            sd = ckpt
+    else:
+        sd = ckpt
+    model.load_state_dict(sd)
+
+
+def orchestrate(
+    cfg: ExperimentConfig,
+    datasets,  # LoadedDatasets
+    allow_pretrain_cache: bool = True,
+) -> Dict[str, Any]:
+    """Build model, run requested stages in order, and return a result dict.
+
+    Behaviour summary:
+      - If `cfg.pretrain_weights_path` is set, those weights are loaded into
+        the model up front and any "pretrain" stage in `cfg.stages` is skipped
+        (i.e. finetune resumes from those weights).
+      - Otherwise the "pretrain" stage (if present) runs normally, optionally
+        hitting the cross-experiment hash cache at `results/_pretrain_cache/`.
+      - Whenever a pretrain stage finishes successfully, the resulting weights
+        are written both to the cache and to `<results_dir>/pretrain.pt` for
+        easy per-experiment reuse.
+
+    Returns
+    -------
+    dict with keys:
+      - 'model'            : the trained torch.nn.Module (on `device`)
+      - 'device'           : torch.device
+      - 'bundle'           : DatasetBundle (preprocessor, tensors, test frames)
+      - 'stage_results'    : List[StageResult]
+      - 'predict_absolute' : bool (copied from cfg.model for downstream use)
+      - 'pretrain_path'    : Optional[Path] of the per-experiment pretrain.pt
+    """
+    device = resolve_device(cfg.device)
+    print(f"[orchestrate] device = {device}")
+
+    # 1. Dataset bundle
+    bundle = prepare_dataset_bundle(cfg, datasets)
+    print(f"[orchestrate] input_dim={bundle.input_dim}, output_dim={bundle.output_dim}")
+
+    # 2. Model
+    torch.manual_seed(cfg.seed)
+    np.random.seed(cfg.seed)
+    model = build_model(cfg.model, input_dim=bundle.input_dim, output_dim=bundle.output_dim).to(device)
+    print(f"[orchestrate] model={cfg.model.name} params={count_parameters(model):,}")
+
+    stage_results: List[StageResult] = []
+    arch_sig = _arch_signature(cfg, bundle.input_dim)
+    cfg.pretrain_cache_key = arch_sig
+    cache_path = _pretrain_cache_path(cfg, arch_sig)
+
+    # 3. Optional: resume-from-pretrain (explicit user-supplied weights).
+    results_dir = Path(cfg.results_dir)
+    per_exp_pretrain_path = results_dir / "pretrain.pt"
+    pretrain_resumed = False
+    if cfg.pretrain_weights_path:
+        weights_path = Path(cfg.pretrain_weights_path)
+        if not weights_path.is_absolute():
+            weights_path = (Path.cwd() / weights_path).resolve()
+        print(f"[orchestrate] resume: loading pretrain weights from {weights_path}")
+        _load_weights_flexible(weights_path, model, device)
+        pretrain_resumed = True
+        # Record a synthetic StageResult so downstream bookkeeping still sees a pretrain entry.
+        stage_results.append(
+            StageResult(
+                stage="pretrain",
+                best_loss=float("nan"),
+                state_dict={k: v.detach().cpu() for k, v in model.state_dict().items()},
+                history=[{"epoch": 0, "train": float("nan"), "val": float("nan"), "lr": float("nan"),
+                          "note": f"resumed from {weights_path}"}],
+            )
+        )
+
+    # 4. Run stages in order
+    for stage in cfg.stages:
+        s = stage.lower().strip()
+        if s == "pretrain":
+            if pretrain_resumed:
+                print("[orchestrate] skipping 'pretrain' stage because pretrain_weights_path was provided.")
+                continue
+            if allow_pretrain_cache and cache_path.exists():
+                print(f"[orchestrate] reusing pretrain cache: {cache_path}")
+                ckpt = torch.load(cache_path, map_location=device)
+                model.load_state_dict(ckpt["state_dict"])
+                stage_results.append(
+                    StageResult(
+                        stage="pretrain",
+                        best_loss=float(ckpt.get("best_loss", float("nan"))),
+                        state_dict={k: v.detach().cpu() for k, v in model.state_dict().items()},
+                        history=ckpt.get("history", []),
+                    )
+                )
+            else:
+                res = run_pretrain(model, device, cfg, bundle)
+                stage_results.append(res)
+                torch.save(
+                    {
+                        "state_dict": model.state_dict(),
+                        "best_loss": res.best_loss,
+                        "history": res.history,
+                        "arch_sig": arch_sig,
+                        "model_name": cfg.model.name,
+                    },
+                    cache_path,
+                )
+                print(f"[orchestrate] pretrain cached at {cache_path}")
+
+            # Always snapshot the pretrain weights per-experiment (even when
+            # reusing the cache) so users can cherry-pick an experiment's
+            # pretrain state as the starting point for another run.
+            per_exp_pretrain_path.parent.mkdir(parents=True, exist_ok=True)
+            torch.save(
+                {
+                    "state_dict": model.state_dict(),
+                    "best_loss": stage_results[-1].best_loss,
+                    "history": stage_results[-1].history,
+                    "arch_sig": arch_sig,
+                    "model_name": cfg.model.name,
+                    "experiment_name": cfg.name,
+                    "saved_by": "orchestrate/pretrain",
+                },
+                per_exp_pretrain_path,
+            )
+            print(f"[orchestrate] per-experiment pretrain snapshot at {per_exp_pretrain_path}")
+        elif s == "finetune":
+            res = run_finetune(model, device, cfg, bundle)
+            stage_results.append(res)
+        elif s == "joint":
+            res = run_joint(model, device, cfg, bundle)
+            stage_results.append(res)
+        else:
+            raise ValueError(f"Unknown stage: {stage!r} (expected: pretrain, finetune, joint)")
+
+    return {
+        "model": model,
+        "device": device,
+        "bundle": bundle,
+        "stage_results": stage_results,
+        "predict_absolute": cfg.model.predict_absolute,
+        "pretrain_path": per_exp_pretrain_path if per_exp_pretrain_path.exists() else None,
+    }
+
+
+# ---------------------------------------------------------------------- #
+# Legacy wrapper (back-compat with pre-refactor entry points)            #
+# ---------------------------------------------------------------------- #
 class PyTorchModelWrapper:
+    """Mimics the pre-refactor wrapper used by `scripts/predict_finetuned.py`."""
+
     def __init__(self, model, device):
         self.model = model
         self.device = device
-        self.model.to(self.device)
+        self.model.to(device)
         self.model.eval()
 
     def predict(self, X, target_gain, target_gain_tilt, mask=None):
         self.model.eval()
         with torch.no_grad():
-            tensor_X = torch.FloatTensor(X).to(self.device)
-
+            tX = torch.FloatTensor(X).to(self.device)
             if mask is not None:
-                tensor_mask = torch.FloatTensor(mask).to(self.device)
-                preds_offset = self.model(tensor_X, tensor_mask)
+                tM = torch.FloatTensor(mask).to(self.device)
+                preds_off = self.model(tX, tM)
             else:
-                preds_offset = self.model(tensor_X)
-
-            preds_offset = preds_offset.cpu().numpy()
-
+                preds_off = self.model(tX)
+            preds_off = preds_off.cpu().numpy()
             baseline = compute_baseline_gain(target_gain, target_gain_tilt)
-
-            preds = baseline + preds_offset
-
+            out = baseline + preds_off
             if mask is not None:
-                preds = preds * mask
-
-            return preds
-
-
-class KaggleScoreLoss(nn.Module):
-    """
-    Differentiable approximation of the Kaggle Score metric.
-    
-    Score = MAE + 0.3 * T95 + 0.1 * Tmax + 0.15 * Std
-    
-    Since Quantile and Max are hard to differentiate stably, we use approximations:
-    - MAE: Standard L1 Loss
-    - Std: Standard deviation calculation
-    - T95: Approximate 95th percentile using Top-K mean (e.g., top 5% mean)
-    - Tmax: Approximate Max using LogSumExp (Softmax) or simply Max (which is differentiable)
-    
-    This loss is intended for finetuning.
-    """
-    def __init__(self, tau=0.5, beta=0.7):
-        super(KaggleScoreLoss, self).__init__()
-        self.tau = tau
-        self.beta = beta
-
-    def forward(self, predictions, targets, mask):
-        # Flatten and filter by mask
-        mask_bool = mask > 0
-        diff = torch.abs(predictions - targets)
-        
-        # We need to compute metrics per row first, then average?
-        # The Kaggle metric says:
-        # Per row MAE: a_i = mean(e_ij)
-        # Dataset level MAE: a_bar = mean(a_i)
-        # This is equivalent to global mean absolute error if all rows have same weight,
-        # but here we should follow row-wise logic if possible.
-        # However, for batch training, we compute over the batch.
-        
-        # 1. Masked Absolute Error
-        # e_ij = |y - y_hat| * mask
-        e = diff * mask
-        
-        # Row-wise counts (K_i)
-        K = mask.sum(dim=1)
-        # Avoid division by zero
-        K = torch.clamp(K, min=1.0)
-        
-        # Row-wise MAE (a_i)
-        a_i = e.sum(dim=1) / K
-        a_bar = a_i.mean()
-        
-        # Row-wise STD (s_i)
-        # s_i = sqrt( mean( (e_ij - a_i)^2 ) ) over valid j
-        # We need to handle the broadcasting of a_i carefully
-        # e_ij is [B, C], a_i is [B]
-        # Only compute for valid masks
-        e_centered = (e - a_i.unsqueeze(1)) * mask # Zero out invalid positions
-        # Variance = sum(e_centered^2) / K
-        var_i = (e_centered ** 2).sum(dim=1) / K
-        s_i = torch.sqrt(var_i + 1e-12) # Add epsilon for stability
-        s_bar = s_i.mean()
-        
-        # 2. Global Quantile & Max Penalty
-        # Flatten all valid errors in the batch
-        all_valid_errors = e[mask_bool]
-        
-        if all_valid_errors.numel() == 0:
-            return a_bar # Fallback
-            
-        # 95% Quantile Approximation
-        # Sorting is differentiable in PyTorch
-        sorted_errors, _ = torch.sort(all_valid_errors)
-        n_errors = sorted_errors.numel()
-        idx95 = int(0.95 * n_errors)
-        # Use a smooth approximation: mean of top 5% errors
-        # This acts as an upper bound for p95 and provides stronger gradients for the tail
-        if idx95 < n_errors:
-            # p95_approx = sorted_errors[idx95] # Direct p95
-            # Robust version: Top 5% Mean (Expected Shortfall / CVaR)
-            p95_approx = sorted_errors[idx95:].mean()
-        else:
-            p95_approx = sorted_errors[-1]
-            
-        t95 = F.relu(p95_approx - a_bar - self.tau)
-        
-        # Max Penalty
-        # Max is differentiable (gradient flows to the max element)
-        e_max = all_valid_errors.max()
-        t_max = F.relu(e_max - p95_approx - self.beta)
-        
-        # Final Score
-        loss = a_bar + 0.3 * t95 + 0.1 * t_max + 0.15 * s_bar
-        
-        return loss
-
-class MaskedMSELoss(nn.Module):
-    def __init__(self):
-        super(MaskedMSELoss, self).__init__()
-
-    def forward(self, predictions, targets, mask):
-        mask = mask.to(predictions.device)
-        squared_diff = (predictions - targets) ** 2
-        masked_squared_diff = squared_diff * mask
-        loss = masked_squared_diff.sum() / mask.sum()
-        return loss
-
-
-def prepare_data(features, labels, preprocessor, mask_cols, target_cols=None):
-    """Extract and process features and targets from raw dataframes."""
-    target_gain = features['target_gain'].values
-    target_gain_tilt = features['target_gain_tilt'].values
-    masks = features[mask_cols].values
-
-    feature_cols = [c for c in features.columns if c not in mask_cols]
-    
-    # Check if we are in 'multiply' mode, which needs mask columns
-    # We can infer this by checking if the preprocessor expects mask columns
-    # A simple way is to pass the entire dataframe if feature_cols doesn't match preprocessor expectations
-    # But a cleaner way is to just pass the whole dataframe, as ColumnTransformer ignores extra columns if remainder='drop'
-    X = preprocessor.transform(features)
-
-    y_offset = None
-    if labels is not None and target_cols is not None:
-        y = labels[target_cols].values
-        baseline = compute_baseline_gain(target_gain, target_gain_tilt)
-        y_offset = (y - baseline) * masks
-
-    return X, y_offset, target_gain, target_gain_tilt, masks
-
-
-def create_dataloaders(X, y_offset, tg, tgt, masks, batch_size, test_size, random_state, device):
-    """Split data and create PyTorch DataLoaders."""
-    X_tr, X_val, y_tr, y_val, mask_tr, mask_val, tg_tr, tg_val, tgt_tr, tgt_val = train_test_split(
-        X, y_offset, masks, tg, tgt, test_size=test_size, random_state=random_state
-    )
-
-    train_dataset = OFCDataset(X_tr, y_tr, tg_tr, tgt_tr, mask_tr)
-    val_dataset = OFCDataset(X_val, y_val, tg_val, tgt_val, mask_val)
-
-    num_workers = 4 if device.type == 'cuda' else 0
-    pin_memory = device.type == 'cuda'
-
-    train_loader = DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=True,
-        num_workers=num_workers, pin_memory=pin_memory
-    )
-    val_loader = DataLoader(
-        val_dataset, batch_size=batch_size, shuffle=False,
-        num_workers=num_workers, pin_memory=pin_memory
-    )
-
-    # Return validation components for final evaluation
-    val_data = (X_val, y_val, tg_val, tgt_val, mask_val)
-    return train_loader, val_loader, val_data
-
-
-class Trainer:
-    """Handles the training loop, validation, and early stopping."""
-    def __init__(self, model, device, criterion=None, use_amp=False):
-        self.model = model
-        self.device = device
-        self.criterion = criterion or MaskedMSELoss()
-        self.scaler = GradScaler() if use_amp and device.type == 'cuda' else None
-        
-        if self.scaler:
-            print("Mixed precision training: Enabled (FP16)")
-
-    def train_epoch(self, loader, optimizer):
-        self.model.train()
-        total_loss = 0.0
-        total_masks = 0.0
-        
-        pbar = tqdm(loader, leave=False, desc="Training")
-        for batch in pbar:
-            X, y, _, _, mask = [b.to(self.device) for b in batch]
-            optimizer.zero_grad()
-            
-            with autocast(device_type=self.device.type, enabled=self.scaler is not None):
-                preds = self.model(X, mask)
-                loss = self.criterion(preds, y, mask)
-
-            if self.scaler:
-                self.scaler.scale(loss).backward()
-                self.scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-                self.scaler.step(optimizer)
-                self.scaler.update()
-            else:
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-                optimizer.step()
-                
-            loss_val = loss.item()
-            mask_sum = mask.sum().item()
-            total_loss += loss_val * mask_sum
-            total_masks += mask_sum
-            
-            pbar.set_postfix({'loss': f'{loss_val:.6f}'})
-            
-        return total_loss / total_masks if total_masks > 0 else 0.0
-
-    def validate(self, loader):
-        self.model.eval()
-        total_loss = 0.0
-        total_masks = 0.0
-        
-        with torch.no_grad():
-            for batch in loader:
-                X, y, _, _, mask = [b.to(self.device) for b in batch]
-                
-                with autocast(device_type=self.device.type, enabled=self.scaler is not None):
-                    preds = self.model(X, mask)
-                    loss = self.criterion(preds, y, mask)
-                    
-                total_loss += loss.item() * mask.sum().item()
-                total_masks += mask.sum().item()
-                
-        return total_loss / total_masks if total_masks > 0 else 0.0
-
-    def fit(self, train_loader, val_loader, optimizer, epochs, patience, 
-            scheduler=None, val_every_n=1, title="Training"):
-        print(f"\n{'='*60}\n{title}\n{'='*60}")
-        best_loss = float('inf')
-        patience_counter = 0
-        best_state = None
-        
-        for epoch in range(epochs):
-            train_loss = self.train_epoch(train_loader, optimizer)
-            
-            if (epoch + 1) % val_every_n == 0:
-                val_loss = self.validate(val_loader)
-                
-                if scheduler:
-                    if isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau):
-                        scheduler.step(val_loss)
-                    else:
-                        scheduler.step()
-                        
-                current_lr = optimizer.param_groups[0]['lr']
-                print(f"Epoch {epoch+1}/{epochs} - Train: {train_loss:.6f} - Val: {val_loss:.6f} - LR: {current_lr:.8f}")
-                
-                if val_loss < best_loss:
-                    best_loss = val_loss
-                    best_state = self.model.state_dict().copy()
-                    patience_counter = 0
-                else:
-                    patience_counter += 1
-                    if patience_counter >= patience:
-                        print(f"Early stopping at epoch {epoch+1}")
-                        break
-        
-        if best_state:
-            self.model.load_state_dict(best_state)
-            
-        return best_loss
+                out = out * mask
+            return out
 
 
 def train_model_two_stage(
@@ -327,202 +730,145 @@ def train_model_two_stage(
     kaggle_features, kaggle_labels,
     test_features,
     preprocessor,
-    mask_cols
+    mask_cols,
 ):
+    """Legacy entry point used by `main.py` and `scripts/predict_finetuned.py`.
+
+    Reads runtime flags from the legacy `config.py` globals so existing
+    callers keep working.  For new experiments use `orchestrate(cfg, ...)`
+    directly.
     """
-    Two-Stage Training:
-    1. Pretrain on COSMOS dataset.
-    2. Discriminative Finetune on Kaggle dataset.
-    """
-    # Detect Device: CUDA > MPS > CPU
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-    elif torch.backends.mps.is_available():
-        device = torch.device("mps")
-    else:
-        device = torch.device("cpu")
-    print(f"Using device: {device}")
+    from .data import LoadedDatasets  # local import to avoid cycle
 
-    # -------------------------------------------------------------------------
-    # 1. Data Preparation
-    # -------------------------------------------------------------------------
-    target_cols = [c for c in cosmos_labels.columns if 'calculated_gain_spectra_' in c]
-    target_cols.sort()
+    device = resolve_device(getattr(cfg_legacy, "DEVICE", "auto"))
+    print(f"[legacy train_model_two_stage] device={device}")
 
-    # COSMOS Data
-    print("\n[Data] Preparing COSMOS dataset...")
-    X_cosmos, y_offset_cosmos, tg_cosmos, tgt_cosmos, mask_cosmos = prepare_data(
-        cosmos_features, cosmos_labels, preprocessor, mask_cols, target_cols
+    target_cols = sorted(
+        [c for c in cosmos_labels.columns if "calculated_gain_spectra_" in c],
+        key=lambda x: int(x.split("_")[-1]),
     )
-    cosmos_loaders = create_dataloaders(
-        X_cosmos, y_offset_cosmos, tg_cosmos, tgt_cosmos, mask_cosmos,
-        PRETRAIN_BATCH_SIZE, TEST_SIZE, RANDOM_STATE, device
+
+    predict_absolute = False
+    X_cos, y_cos, tg_cos, tgt_cos, m_cos = prepare_offset_targets(
+        cosmos_features, cosmos_labels, preprocessor, mask_cols, target_cols, predict_absolute,
     )
-    cosmos_train_loader, cosmos_val_loader, _ = cosmos_loaders
-
-    # Kaggle Data
-    print("[Data] Preparing Kaggle dataset...")
-    X_kaggle, y_offset_kaggle, tg_kaggle, tgt_kaggle, mask_kaggle = prepare_data(
-        kaggle_features, kaggle_labels, preprocessor, mask_cols, target_cols
+    X_kag, y_kag, tg_kag, tgt_kag, m_kag = prepare_offset_targets(
+        kaggle_features, kaggle_labels, preprocessor, mask_cols, target_cols, predict_absolute,
     )
-    kaggle_loaders = create_dataloaders(
-        X_kaggle, y_offset_kaggle, tg_kaggle, tgt_kaggle, mask_kaggle,
-        FINETUNE_BATCH_SIZE, TEST_SIZE, RANDOM_STATE, device
+
+    torch.manual_seed(getattr(cfg_legacy, "RANDOM_STATE", 42))
+    np.random.seed(getattr(cfg_legacy, "RANDOM_STATE", 42))
+    # Build model via the registry using legacy config values.
+    from .configs.schema import ModelConfig
+    mcfg = ModelConfig(
+        name="hybrid_fno_kan",
+        hidden_dims=list(cfg_legacy.HYBRID_FNO_KAN_HIDDEN_DIMS),
+        dropout=cfg_legacy.HYBRID_FNO_KAN_DROPOUT,
+        n_frequencies=cfg_legacy.HYBRID_FNO_KAN_N_FREQUENCIES,
+        spectral_freq_ratio=cfg_legacy.HYBRID_FNO_KAN_SPECTRAL_FREQ_RATIO,
+        use_spectral_mixing=cfg_legacy.HYBRID_FNO_KAN_USE_SPECTRAL_MIXING,
     )
-    kaggle_train_loader, kaggle_val_loader, kaggle_val_data = kaggle_loaders
-    X_k_val, y_offset_k_val, _, _, mask_k_val = kaggle_val_data
+    model = build_model(mcfg, input_dim=X_cos.shape[1], output_dim=y_cos.shape[1]).to(device)
+    print(f"[legacy] params={count_parameters(model):,}")
 
-    # -------------------------------------------------------------------------
-    # 2. Model Initialization
-    # -------------------------------------------------------------------------
-    model = HybridFNOKANPredictor(
-        input_dim=X_cosmos.shape[1],
-        output_dim=y_offset_cosmos.shape[1],
-        hidden_dims=HYBRID_FNO_KAN_HIDDEN_DIMS,
-        dropout=HYBRID_FNO_KAN_DROPOUT,
-        use_residual=True,
-        n_frequencies=HYBRID_FNO_KAN_N_FREQUENCIES,
-        spectral_freq_ratio=HYBRID_FNO_KAN_SPECTRAL_FREQ_RATIO,
-        use_spectral_mixing=HYBRID_FNO_KAN_USE_SPECTRAL_MIXING,
-    ).to(device)
-
-    print(f"\nModel Params: {sum(p.numel() for p in model.parameters()):,}")
-    trainer = Trainer(model, device, use_amp=USE_MIXED_PRECISION)
-
-    # -------------------------------------------------------------------------
-    # 3. Stage 1: Pretraining (COSMOS)
-    # -------------------------------------------------------------------------
+    # Stage 1 (pretrain) with optional load
     pretrain_loss = None
-    run_pretraining = True
-
-    if LOAD_PRETRAINED_MODEL and PRETRAIN_MODEL_PATH.exists():
+    pretrain_path = Path(cfg_legacy.PRETRAIN_MODEL_PATH)
+    ran_pretrain = True
+    if getattr(cfg_legacy, "LOAD_PRETRAINED_MODEL", False) and pretrain_path.exists():
         try:
-            print(f"\n[Pretrain] Loading model from {PRETRAIN_MODEL_PATH}")
-            checkpoint = torch.load(PRETRAIN_MODEL_PATH, map_location=device)
-            model.load_state_dict(checkpoint['model_state_dict'])
-            pretrain_loss = checkpoint.get('pretrain_loss')
-            run_pretraining = False
-            print("✓ Pretrained model loaded.")
-        except Exception as e:
-            print(f"✗ Failed to load model: {e}. Retraining...")
+            ckpt = torch.load(pretrain_path, map_location=device)
+            model.load_state_dict(ckpt["model_state_dict"])
+            pretrain_loss = ckpt.get("pretrain_loss")
+            ran_pretrain = False
+            print(f"[legacy] loaded pretrained weights from {pretrain_path}")
+        except Exception as e:  # noqa: BLE001
+            print(f"[legacy] failed to load pretrained weights: {e}; will retrain")
 
-    if run_pretraining:
-        # Determine Loss Function for Pretraining
-        use_kaggle_loss_pretrain = USE_KAGGLE_SCORE_LOSS in ["both"]
-        criterion_pretrain = KaggleScoreLoss() if use_kaggle_loss_pretrain else MaskedMSELoss()
-        print(f"[Loss] Pretraining using: {type(criterion_pretrain).__name__}")
-        
-        # Re-initialize trainer if loss changed from default
-        if use_kaggle_loss_pretrain:
-            trainer = Trainer(model, device, criterion=criterion_pretrain, use_amp=USE_MIXED_PRECISION)
-
-        optimizer = optim.Adam(model.parameters(), lr=PRETRAIN_LEARNING_RATE, weight_decay=PRETRAIN_WEIGHT_DECAY)
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=15)
-        
-        pretrain_loss = trainer.fit(
-            cosmos_train_loader, cosmos_val_loader, optimizer,
-            epochs=PRETRAIN_EPOCHS, patience=PRETRAIN_EARLY_STOPPING_PATIENCE,
-            scheduler=scheduler, val_every_n=PRETRAIN_VAL_EVERY_N_EPOCHS,
-            title="Stage 1: Pretraining (COSMOS)"
+    if ran_pretrain:
+        stage = StageConfig(
+            learning_rate=cfg_legacy.PRETRAIN_LEARNING_RATE,
+            weight_decay=cfg_legacy.PRETRAIN_WEIGHT_DECAY,
+            batch_size=cfg_legacy.PRETRAIN_BATCH_SIZE,
+            epochs=cfg_legacy.PRETRAIN_EPOCHS,
+            early_stopping_patience=cfg_legacy.PRETRAIN_EARLY_STOPPING_PATIENCE,
+            val_every_n_epochs=cfg_legacy.PRETRAIN_VAL_EVERY_N_EPOCHS,
+            optimizer="adam",
+            loss="masked_mse",
         )
-        
-        # Save Pretrained Model
-        PRETRAIN_MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+        res = _run_stage(
+            model, device, stage,
+            dict(X=X_cos, y=y_cos, tg=tg_cos, tgt=tgt_cos, mask=m_cos),
+            val_size=getattr(cfg_legacy, "TEST_SIZE", 0.05),
+            random_state=getattr(cfg_legacy, "RANDOM_STATE", 42),
+            title="legacy pretrain",
+        )
+        pretrain_loss = res.best_loss
+        pretrain_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save({
-            'model_state_dict': model.state_dict(),
-            'pretrain_loss': pretrain_loss,
-            'input_dim': X_cosmos.shape[1],
-            'output_dim': y_offset_cosmos.shape[1]
-        }, PRETRAIN_MODEL_PATH)
-        print(f"Pretrained model saved to {PRETRAIN_MODEL_PATH}")
+            "model_state_dict": model.state_dict(),
+            "pretrain_loss": pretrain_loss,
+            "input_dim": X_cos.shape[1],
+            "output_dim": y_cos.shape[1],
+        }, pretrain_path)
 
-    # Create a wrapper for the pretrained model (before finetuning)
-    # We need to deepcopy the model state because training continues in-place
-    import copy
-    pretrained_model_state = copy.deepcopy(model.state_dict())
-    
-    # -------------------------------------------------------------------------
-    # 4. Stage 2: Finetuning (Kaggle)
-    # -------------------------------------------------------------------------
-    print("\n[Finetune] Starting finetuning...")
-    
-    # Determine Loss Function for Finetuning
-    use_kaggle_loss_finetune = USE_KAGGLE_SCORE_LOSS in ["finetune", "both"]
-    criterion_ft = KaggleScoreLoss() if use_kaggle_loss_finetune else MaskedMSELoss()
-    print(f"[Loss] Finetuning using: {type(criterion_ft).__name__}")
-    
-    # Re-initialize trainer with new loss (always re-init to be safe)
-    trainer_ft = Trainer(model, device, criterion=criterion_ft, use_amp=USE_MIXED_PRECISION)
-    
-    optimizer_ft = optim.AdamW(model.parameters(), lr=FINETUNE_LEARNING_RATE, weight_decay=FINETUNE_WEIGHT_DECAY)
-    
-    # Scheduler for fine-tuning to improve convergence
-    scheduler_ft = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer_ft, mode='min', factor=0.5, patience=10, min_lr=1e-7
+    pretrained_state = copy.deepcopy(model.state_dict())
+
+    # Stage 2 (finetune)
+    use_kaggle_loss = str(getattr(cfg_legacy, "USE_KAGGLE_SCORE_LOSS", "none")).lower() in {"finetune", "both"}
+    ft_stage = StageConfig(
+        learning_rate=cfg_legacy.FINETUNE_LEARNING_RATE,
+        weight_decay=cfg_legacy.FINETUNE_WEIGHT_DECAY,
+        batch_size=cfg_legacy.FINETUNE_BATCH_SIZE,
+        epochs=cfg_legacy.FINETUNE_EPOCHS,
+        early_stopping_patience=cfg_legacy.FINETUNE_EARLY_STOPPING_PATIENCE,
+        val_every_n_epochs=cfg_legacy.FINETUNE_VAL_EVERY_N_EPOCHS,
+        optimizer="adamw",
+        loss="kaggle_score" if use_kaggle_loss else "masked_mse",
     )
-    
-    finetune_loss = trainer_ft.fit(
-        kaggle_train_loader, kaggle_val_loader, optimizer_ft,
-        epochs=FINETUNE_EPOCHS, patience=FINETUNE_EARLY_STOPPING_PATIENCE,
-        scheduler=scheduler_ft,
-        val_every_n=FINETUNE_VAL_EVERY_N_EPOCHS,
-        title="Stage 2: Finetuning (Kaggle)"
+    ft_res = _run_stage(
+        model, device, ft_stage,
+        dict(X=X_kag, y=y_kag, tg=tg_kag, tgt=tgt_kag, mask=m_kag),
+        val_size=getattr(cfg_legacy, "TEST_SIZE", 0.05),
+        random_state=getattr(cfg_legacy, "RANDOM_STATE", 42),
+        title="legacy finetune",
     )
 
-    # Save Finetuned Model
-    FINETUNE_MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    ft_path = Path(cfg_legacy.FINETUNE_MODEL_PATH)
+    ft_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save({
-        'model_state_dict': model.state_dict(),
-        'finetune_loss': finetune_loss,
-        'input_dim': X_kaggle.shape[1],
-        'output_dim': y_offset_kaggle.shape[1]
-    }, FINETUNE_MODEL_PATH)
-    print(f"Finetuned model saved to {FINETUNE_MODEL_PATH}")
+        "model_state_dict": model.state_dict(),
+        "finetune_loss": ft_res.best_loss,
+        "input_dim": X_kag.shape[1],
+        "output_dim": y_kag.shape[1],
+    }, ft_path)
 
-    # -------------------------------------------------------------------------
-    # 5. Final Evaluation
-    # -------------------------------------------------------------------------
-    print("\n" + "="*80)
-    print("FINAL EVALUATION")
-    print("="*80)
-    
-    # Wrapper for Finetuned Model
-    wrapper_finetuned = PyTorchModelWrapper(model, device)
-    
-    # Wrapper for Pretrained Model
-    model_pretrained = HybridFNOKANPredictor(
-        input_dim=X_cosmos.shape[1],
-        output_dim=y_offset_cosmos.shape[1],
-        hidden_dims=HYBRID_FNO_KAN_HIDDEN_DIMS,
-        dropout=HYBRID_FNO_KAN_DROPOUT,
-        use_residual=True,
-        n_frequencies=HYBRID_FNO_KAN_N_FREQUENCIES,
-        spectral_freq_ratio=HYBRID_FNO_KAN_SPECTRAL_FREQ_RATIO,
-        use_spectral_mixing=HYBRID_FNO_KAN_USE_SPECTRAL_MIXING,
-    ).to(device)
-    model_pretrained.load_state_dict(pretrained_model_state)
-    wrapper_pretrained = PyTorchModelWrapper(model_pretrained, device)
-    
-    # Calculate metrics on Kaggle validation set (Finetuned)
-    y_pred_offset = model(torch.FloatTensor(X_k_val).to(device), torch.FloatTensor(mask_k_val).to(device))
-    y_pred_offset = y_pred_offset.detach().cpu().numpy()
-    
-    y_pred_masked = y_pred_offset * mask_k_val
-    y_true_masked = y_offset_k_val * mask_k_val
-    
+    # Evaluation mirroring the original code
+    X_k_val = X_kag  # legacy split is recomputed inside fit; we just report on full kaggle
+    mask_k_val = m_kag
+    y_offset_k_val = y_kag
+    with torch.no_grad():
+        y_pred_off = model(
+            torch.FloatTensor(X_k_val).to(device),
+            torch.FloatTensor(mask_k_val).to(device),
+        ).cpu().numpy()
     non_zero = mask_k_val > 0
-    mse = mean_squared_error(y_true_masked[non_zero], y_pred_masked[non_zero])
-    mae = mean_absolute_error(y_true_masked[non_zero], y_pred_masked[non_zero])
-    rmse = np.sqrt(mse)
-    
-    print(f"Validation MSE: {mse:.6f}")
-    print(f"Validation RMSE: {rmse:.6f}")
-    print(f"Validation MAE: {mae:.6f}")
+    mse = mean_squared_error((y_offset_k_val * mask_k_val)[non_zero], (y_pred_off * mask_k_val)[non_zero])
+    mae = mean_absolute_error((y_offset_k_val * mask_k_val)[non_zero], (y_pred_off * mask_k_val)[non_zero])
+    rmse = float(np.sqrt(mse))
+    print(f"[legacy] Kaggle-train MSE={mse:.6f} RMSE={rmse:.6f} MAE={mae:.6f}")
+
+    wrapper_ft = PyTorchModelWrapper(model, device)
+    # Pretrained wrapper (re-built from saved state)
+    from .configs.schema import ModelConfig as _MC
+    mcfg2 = mcfg
+    model_pt = build_model(mcfg2, input_dim=X_cos.shape[1], output_dim=y_cos.shape[1]).to(device)
+    model_pt.load_state_dict(pretrained_state)
+    wrapper_pt = PyTorchModelWrapper(model_pt, device)
 
     metrics = {
-        "mse": mse, "mae": mae, "rmse": rmse,
-        "pretrain_loss": pretrain_loss,
-        "finetune_loss": finetune_loss
+        "mse": float(mse), "mae": float(mae), "rmse": float(rmse),
+        "pretrain_loss": float(pretrain_loss) if pretrain_loss is not None else None,
+        "finetune_loss": float(ft_res.best_loss),
     }
-
-    return wrapper_finetuned, wrapper_pretrained, metrics
+    return wrapper_ft, wrapper_pt, metrics

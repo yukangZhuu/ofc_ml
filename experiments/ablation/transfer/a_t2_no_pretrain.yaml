@@ -1,0 +1,20 @@
+base: ../../base.yaml
+name: a_t2_no_pretrain
+
+# Ablation: Kaggle-only training from scratch (no COSMOS pretraining).
+# We run the finetune stage with a larger epoch budget so it has a fair
+# chance to converge from random initialization on the small Kaggle set.
+model:
+  name: hybrid_fno_kan
+  use_spectral_mixing: true
+  use_fourier_kan: true
+
+stages: [finetune]
+
+finetune:
+  # Slightly higher LR + longer schedule to approximate "from scratch on Kaggle".
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  epochs: 800
+  early_stopping_patience: 80
+  optimizer: adam

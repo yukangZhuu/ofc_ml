@@ -1,0 +1,9 @@
+base: ../base.yaml
+name: m3_cnn1d
+
+model:
+  name: cnn1d
+  cnn_channels: [64, 96, 128, 160]
+  cnn_kernel_size: 7
+
+stages: [pretrain, finetune]

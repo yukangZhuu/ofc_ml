@@ -1,0 +1,8 @@
+base: ../base.yaml
+name: m2_mlp
+
+model:
+  name: mlp
+  # Same depth/width as Ours so that param counts are comparable (~284K vs 292K).
+
+stages: [pretrain, finetune]

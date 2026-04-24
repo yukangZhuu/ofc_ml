@@ -1,0 +1,10 @@
+base: ../../base.yaml
+name: a_a1_wo_spectral
+
+# Ablation: remove SpectralMixing, keep FourierKAN blocks.
+model:
+  name: hybrid_fno_kan
+  use_spectral_mixing: false
+  use_fourier_kan: true
+
+stages: [pretrain, finetune]

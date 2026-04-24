@@ -1,0 +1,10 @@
+base: ../../base.yaml
+name: ds_pretrain_100
+
+# Reference cell (matches m1_ours); kept here so the line plot on COSMOS ratio
+# has 3 data points (25/50/100).
+data:
+  cosmos_ratio: 1.0
+  kaggle_ratio: 1.0
+
+stages: [pretrain, finetune]

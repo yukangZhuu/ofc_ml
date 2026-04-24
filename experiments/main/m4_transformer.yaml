@@ -1,0 +1,11 @@
+base: ../base.yaml
+name: m4_transformer
+
+model:
+  name: transformer
+  tr_d_model: 96
+  tr_nhead: 4
+  tr_num_layers: 4
+  tr_dim_feedforward: 192
+
+stages: [pretrain, finetune]

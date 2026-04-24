@@ -1,0 +1,11 @@
+base: ../../base.yaml
+name: a_t1_no_finetune
+
+# Ablation: pretrain-only (evaluate zero-shot transfer from COSMOS).
+# Reuses the pretrain cache of m1_ours (same arch + cosmos_ratio + seed).
+model:
+  name: hybrid_fno_kan
+  use_spectral_mixing: true
+  use_fourier_kan: true
+
+stages: [pretrain]

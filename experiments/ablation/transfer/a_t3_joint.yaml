@@ -1,0 +1,23 @@
+base: ../../base.yaml
+name: a_t3_joint
+
+# Ablation: single-stage training on concat(COSMOS, Kaggle).
+# Tests whether the two-stage pretrain/finetune protocol outperforms a
+# simpler "pool the datasets together and train once" baseline.
+model:
+  name: hybrid_fno_kan
+  use_spectral_mixing: true
+  use_fourier_kan: true
+
+stages: [joint]
+
+joint:
+  enabled: true
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  batch_size: 256
+  epochs: 500
+  early_stopping_patience: 40
+  val_every_n_epochs: 2
+  optimizer: adam
+  loss: masked_mse

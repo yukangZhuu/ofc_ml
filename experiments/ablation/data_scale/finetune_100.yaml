@@ -1,0 +1,9 @@
+base: ../../base.yaml
+name: ds_finetune_100
+
+# Reference cell (matches m1_ours and ds_pretrain_100).
+data:
+  cosmos_ratio: 1.0
+  kaggle_ratio: 1.0
+
+stages: [pretrain, finetune]

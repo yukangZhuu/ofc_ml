@@ -1,0 +1,8 @@
+base: ../../base.yaml
+name: ds_pretrain_50
+
+data:
+  cosmos_ratio: 0.5
+  kaggle_ratio: 1.0
+
+stages: [pretrain, finetune]

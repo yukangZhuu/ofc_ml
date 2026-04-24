@@ -1,0 +1,15 @@
+base: ../../base.yaml
+name: a_p1_predict_absolute
+
+# Ablation: remove the physical-baseline parameterization.  Instead of
+# predicting (label - baseline) and adding the analytical tilt line back at
+# inference time, the model is asked to regress the absolute gain spectrum
+# directly.  Everything else matches M-1 so the only variable is the
+# target parameterization.
+model:
+  name: hybrid_fno_kan
+  use_spectral_mixing: true
+  use_fourier_kan: true
+  predict_absolute: true
+
+stages: [pretrain, finetune]

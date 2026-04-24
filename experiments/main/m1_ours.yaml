@@ -1,0 +1,9 @@
+base: ../base.yaml
+name: m1_ours
+
+model:
+  name: hybrid_fno_kan
+  use_spectral_mixing: true
+  use_fourier_kan: true
+
+stages: [pretrain, finetune]

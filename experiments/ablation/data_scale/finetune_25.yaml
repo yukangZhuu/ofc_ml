@@ -1,0 +1,9 @@
+base: ../../base.yaml
+name: ds_finetune_25
+
+# Data-scale ablation: Pretrain on 100% COSMOS, fine-tune on 25% Kaggle (~118 rows).
+data:
+  cosmos_ratio: 1.0
+  kaggle_ratio: 0.25
+
+stages: [pretrain, finetune]

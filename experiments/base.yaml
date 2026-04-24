@@ -1,0 +1,86 @@
+# Common defaults shared by all experiments.  Every other YAML under
+# experiments/ references this file via `base: ../base.yaml` (or similar)
+# and overrides only the fields that differ.
+
+stages: [pretrain, finetune]
+device: auto
+seed: 42
+
+data:
+  data_dir: data/ofc-2026-ml-challenge
+  train_features_path: data/ofc-2026-ml-challenge/train_features_clean_1.csv
+  train_labels_path: data/ofc-2026-ml-challenge/train_labels_clean_1.csv
+  test_features_path: data/ofc-2026-ml-challenge/test_features.csv
+  test_labels_path: data/ofc-2026-ml-challenge/test_labels.csv
+  cosmos_data_dir: data/cosmos-as-kaggle
+  cosmos_train_features_path: data/cosmos-as-kaggle/train_features.csv
+  cosmos_train_labels_path: data/cosmos-as-kaggle/train_labels.csv
+  cosmos_ratio: 1.0
+  kaggle_ratio: 1.0
+  val_size: 0.05
+  random_state: 42
+
+feature:
+  use_mask: concat
+
+model:
+  name: hybrid_fno_kan
+  hidden_dims: [256, 256, 128, 128, 128]
+  dropout: 0.2
+  n_frequencies: 4
+  spectral_freq_ratio: 0.5
+  use_spectral_mixing: true
+  use_fourier_kan: true
+  use_residual: true
+  predict_absolute: false
+  # baseline-specific defaults (ignored when name != cnn1d/transformer)
+  cnn_channels: [64, 96, 128, 160]
+  cnn_kernel_size: 7
+  tr_d_model: 96
+  tr_nhead: 4
+  tr_num_layers: 4
+  tr_dim_feedforward: 192
+
+pretrain:
+  enabled: true
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  batch_size: 256
+  epochs: 500
+  early_stopping_patience: 40
+  val_every_n_epochs: 2
+  optimizer: adam
+  loss: masked_mse
+  grad_clip: 1.0
+
+finetune:
+  enabled: true
+  learning_rate: 0.0002
+  weight_decay: 0.00005
+  batch_size: 64
+  epochs: 500
+  early_stopping_patience: 60
+  val_every_n_epochs: 1
+  optimizer: adamw
+  loss: masked_mse
+  grad_clip: 1.0
+
+joint:
+  enabled: false
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  batch_size: 256
+  epochs: 500
+  early_stopping_patience: 40
+  val_every_n_epochs: 2
+  optimizer: adam
+  loss: masked_mse
+  grad_clip: 1.0
+
+eval:
+  save_submission: true
+  per_category: true
+  per_edfa_type: true
+  per_usage: true
+
+results_root: results

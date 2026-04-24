@@ -19,6 +19,9 @@ venv/
 /submissions
 submission.csv
 
+# Experiment outputs (per-experiment subdirs, pretrain cache, aggregated tables, run state)
+/results/
+
 # WandB
 wandb/
 
