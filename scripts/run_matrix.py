@@ -52,10 +52,13 @@ from typing import Any, Dict, List, Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 EXPERIMENTS_DIR = PROJECT_ROOT / "experiments"
-RESULTS_ROOT = PROJECT_ROOT / "results"
-STATE_FILE = RESULTS_ROOT / "_run_state.json"
-LIVE_LOG_FILE = RESULTS_ROOT / "_run_matrix.log"
+RESULTS_ROOT = PROJECT_ROOT / "results"  # parent; seed subdirs live beneath
 RUN_SINGLE = PROJECT_ROOT / "scripts" / "run_experiment.py"
+
+
+def seed_results_root(seed: int) -> Path:
+    """All per-seed artefacts (exp dirs, pretrain cache, state file, log) go here."""
+    return RESULTS_ROOT / f"seed_{seed}"
 
 
 # ------------------------------------------------------------------ #
@@ -175,9 +178,9 @@ def _fmt_duration(sec: Optional[float]) -> str:
     return f"{m:>3d}m{s:02d}s"
 
 
-def print_board(state: RunState, order: List[str], current: Optional[str] = None, note: str = "") -> None:
+def print_board(state: RunState, order: List[str], seed: int, current: Optional[str] = None, note: str = "") -> None:
     print("\n" + "=" * 78)
-    print(f"Matrix progress @ {datetime.now().isoformat(timespec='seconds')}  {note}")
+    print(f"Matrix progress (seed={seed}) @ {datetime.now().isoformat(timespec='seconds')}  {note}")
     print("-" * 78)
     print(f"{'':2s} {'status':10s} {'experiment':28s} {'MAE(dB)':>8s}  {'Score(dB)':>9s}  {'dur':>9s}")
     for n in order:
@@ -200,8 +203,8 @@ def print_board(state: RunState, order: List[str], current: Optional[str] = None
 # ------------------------------------------------------------------ #
 # Launching a single experiment                                      #
 # ------------------------------------------------------------------ #
-def _collect_overall_from_metrics(exp_name: str) -> tuple[Optional[float], Optional[float]]:
-    p = RESULTS_ROOT / exp_name / "metrics.json"
+def _collect_overall_from_metrics(seed: int, exp_name: str) -> tuple[Optional[float], Optional[float]]:
+    p = seed_results_root(seed) / exp_name / "metrics.json"
     if not p.exists():
         return None, None
     try:
@@ -212,13 +215,15 @@ def _collect_overall_from_metrics(exp_name: str) -> tuple[Optional[float], Optio
         return None, None
 
 
-def launch_experiment(rec: RunRecord, overrides: List[str], no_cache: bool, force: bool) -> int:
+def launch_experiment(rec: RunRecord, overrides: List[str], no_cache: bool, force: bool, seed: int) -> int:
     """Start run_experiment.py for `rec`, stream its output, return rc."""
     cmd = [
         sys.executable,
         str(RUN_SINGLE),
         "--config",
         str(PROJECT_ROOT / rec.config_path),
+        "--seed",
+        str(seed),
     ]
     if force:
         cmd.append("--force")
@@ -227,7 +232,7 @@ def launch_experiment(rec: RunRecord, overrides: List[str], no_cache: bool, forc
     if overrides:
         cmd += ["--override", *overrides]
 
-    exp_log_dir = RESULTS_ROOT / rec.name / "logs"
+    exp_log_dir = seed_results_root(seed) / rec.name / "logs"
     exp_log_dir.mkdir(parents=True, exist_ok=True)
     exp_log_file = exp_log_dir / "run_matrix.log"
 
@@ -263,6 +268,8 @@ def launch_experiment(rec: RunRecord, overrides: List[str], no_cache: bool, forc
 # ------------------------------------------------------------------ #
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--seed", type=int, default=42,
+                    help="Seed for this matrix run. All outputs land under results/seed_<SEED>/. Default 42.")
     ap.add_argument("--force", action="store_true", help="Re-run experiments even if they already completed.")
     ap.add_argument("--skip-failed", action="store_true", help="Leave previously failed experiments as-is.")
     ap.add_argument("--no-cache", action="store_true", help="Disable pretrain cache reuse in orchestrate()")
@@ -273,6 +280,11 @@ def main():
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--override", nargs="*", default=[], help="key=value overrides applied to every experiment.")
     args = ap.parse_args()
+
+    seed = int(args.seed)
+    seed_root = seed_results_root(seed)
+    state_file = seed_root / "_run_state.json"
+    live_log_file = seed_root / "_run_matrix.log"
 
     ordered_paths: List[Path] = [PROJECT_ROOT / p for p in ORDERED_EXPERIMENTS]
     if args.include_data_scale:
@@ -290,7 +302,7 @@ def main():
         print("[run_matrix] no experiments selected.")
         return 1
 
-    state = RunState.load(STATE_FILE)
+    state = RunState.load(state_file)
     order_names: List[str] = []
     # Reconcile state with the ordered plan.
     for p in ordered_paths:
@@ -301,9 +313,9 @@ def main():
             rec = RunRecord(name=name, config_path=str(p.relative_to(PROJECT_ROOT)))
             state.records[name] = rec
         # If `metrics.json` exists but state says otherwise, promote to done.
-        metrics_path = RESULTS_ROOT / name / "metrics.json"
+        metrics_path = seed_root / name / "metrics.json"
         if metrics_path.exists() and rec.status != "failed":
-            mae, score = _collect_overall_from_metrics(name)
+            mae, score = _collect_overall_from_metrics(seed, name)
             rec.status = "done"
             rec.overall_mae_dB = mae
             rec.overall_kaggle_dB = score
@@ -311,21 +323,21 @@ def main():
         if rec.status == "running":
             rec.status = "interrupted"
 
-    state.save(STATE_FILE)
+    state.save(state_file)
 
     if args.dry_run:
-        print_board(state, order_names, note="(dry-run)")
+        print_board(state, order_names, seed=seed, note="(dry-run)")
         return 0
 
-    RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
+    seed_root.mkdir(parents=True, exist_ok=True)
     try:
-        with LIVE_LOG_FILE.open("a") as flog:
-            flog.write(f"\n===== run_matrix START @ {datetime.now().isoformat(timespec='seconds')} =====\n")
+        with live_log_file.open("a") as flog:
+            flog.write(f"\n===== run_matrix seed={seed} START @ {datetime.now().isoformat(timespec='seconds')} =====\n")
             flog.write(f"args = {vars(args)}\n")
     except Exception:
         pass
 
-    print_board(state, order_names, note="(initial)")
+    print_board(state, order_names, seed=seed, note="(initial)")
 
     interrupted = False
     for p in ordered_paths:
@@ -338,17 +350,17 @@ def main():
             continue
 
         try:
-            rc = launch_experiment(rec, args.override, no_cache=args.no_cache, force=args.force)
+            rc = launch_experiment(rec, args.override, no_cache=args.no_cache, force=args.force, seed=seed)
         except KeyboardInterrupt:
             interrupted = True
             rec.status = "interrupted"
             rec.error = "KeyboardInterrupt from run_matrix"
-            state.save(STATE_FILE)
-            print_board(state, order_names, current=name, note="(KeyboardInterrupt)")
+            state.save(state_file)
+            print_board(state, order_names, seed=seed, current=name, note="(KeyboardInterrupt)")
             break
 
         if rc == 0:
-            mae, score = _collect_overall_from_metrics(name)
+            mae, score = _collect_overall_from_metrics(seed, name)
             rec.overall_mae_dB = mae
             rec.overall_kaggle_dB = score
             rec.status = "done"
@@ -357,8 +369,8 @@ def main():
             rec.status = "failed"
             rec.error = f"run_experiment.py returned {rc}"
 
-        state.save(STATE_FILE)
-        print_board(state, order_names, current=name, note=f"(after {name})")
+        state.save(state_file)
+        print_board(state, order_names, seed=seed, current=name, note=f"(after {name})")
 
     # Final summary
     done = sum(1 for n in order_names if state.records[n].status == "done")
@@ -367,9 +379,9 @@ def main():
     pending = sum(1 for n in order_names if state.records[n].status == "pending")
 
     print("\n" + "#" * 78)
-    print(f"# Summary: done={done}  failed={failed}  interrupted={interrupted_n}  pending={pending}")
-    print(f"# State file : {STATE_FILE}")
-    print(f"# Live log   : {LIVE_LOG_FILE}")
+    print(f"# Summary (seed={seed}): done={done}  failed={failed}  interrupted={interrupted_n}  pending={pending}")
+    print(f"# State file : {state_file}")
+    print(f"# Live log   : {live_log_file}")
     print("#" * 78)
     return 0 if (failed == 0 and not interrupted) else 2
 

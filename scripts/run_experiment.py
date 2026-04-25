@@ -71,10 +71,24 @@ def main():
         "--no-cache", action="store_true",
         help="Disable pretrain checkpoint cache (force pretrain to actually run)",
     )
+    ap.add_argument(
+        "--seed", type=int, default=None,
+        help=(
+            "Override cfg.seed and cfg.data.random_state to this value, and "
+            "scope all outputs to results/seed_<SEED>/. Supersedes any "
+            "results_root / seed / random_state provided via YAML or --override."
+        ),
+    )
     args = ap.parse_args()
 
     cfg = load_experiment_config(args.config)
     _apply_overrides(cfg, args.override)
+
+    # `--seed N`: couple model seed + data split seed + results_root in one go.
+    if args.seed is not None:
+        cfg.seed = int(args.seed)
+        cfg.data.random_state = int(args.seed)
+        cfg.results_root = Path(f"results/seed_{args.seed}")
 
     results_dir = Path(cfg.results_dir)
     if _exists_already(results_dir) and not args.force:
