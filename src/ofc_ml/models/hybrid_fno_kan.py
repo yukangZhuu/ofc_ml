@@ -100,10 +100,15 @@ class MLPBlock(nn.Module):
 
 
 class SpectralMixingLayer(nn.Module):
-    """Lightweight frequency-domain mixing (FNO-like).
+    """Lightweight frequency-domain mixing, following the standard FNO formulation.
 
     Applies rFFT over the feature (hidden) dimension, multiplies the lowest
-    `freq_ratio` modes by learnable complex weights, and inverts back.
+    `freq_ratio` modes by learnable complex weights, **truncates the remaining
+    high-frequency modes to zero**, and inverts back.
+
+    Truncating (rather than passing through) the un-parameterised high modes
+    matches the canonical FNO layer (Li et al. 2020) and lets the layer act as
+    a near-zero residual at initialisation when paired with small-std weights.
     """
 
     def __init__(self, hidden_dim: int, freq_ratio: float = 0.5):
@@ -118,7 +123,12 @@ class SpectralMixingLayer(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x_ft = torch.fft.rfft(x, dim=1)
-        out_ft = x_ft.clone()
+        # Standard FNO low-pass convolution: zero every mode above n_modes.
+        # Previously this used `x_ft.clone()`, which passed the high-frequency
+        # content through untouched and forced the residual layer to add a
+        # doubled copy of x's high-frequency component at every call - a
+        # structural bias that the learnable weights could not cancel out.
+        out_ft = torch.zeros_like(x_ft)
         weights = torch.complex(self.weights_real, self.weights_imag)
         out_ft[:, : self.n_modes] = x_ft[:, : self.n_modes] * weights.unsqueeze(0)
         return torch.fft.irfft(out_ft, n=self.hidden_dim, dim=1)
@@ -128,8 +138,15 @@ class HybridFNOKANPredictor(nn.Module):
     """FourierKAN stack interleaved with optional SpectralMixing layers.
 
     Architecture (per block i):
-        y = block_i(x) + proj_i(x)                      # block residual
-        y = y + spectral_mixing_i(y)                    # spectral residual (optional)
+        y = block_i(x) + proj_i(x)                             # block residual
+        y = y + gate_i * spectral_mixing_i(y)                  # gated spectral residual
+
+    The per-layer scalar `gate_i` is initialised to 0 so that the spectral
+    residual starts as an exact identity; training can gradually open it if the
+    low-pass mixing is useful, otherwise the layer stays dormant.  Combined
+    with the FNO-correct `SpectralMixingLayer`, this ensures the full model
+    can, in the limit, recover the "no-spectral" ablation and therefore is
+    guaranteed a search space that is a strict super-set of the ablation.
 
     After the last block, a `Linear(prev, output_dim)` head predicts the target.
     When `mask` is provided at `forward`, the output is element-wise multiplied
@@ -159,6 +176,9 @@ class HybridFNOKANPredictor(nn.Module):
         self.blocks = nn.ModuleList()
         self.proj = nn.ModuleList()
         self.spectral_mixings = nn.ModuleList()
+        # One learnable scalar per spectral-mixing layer; initialised to 0 so
+        # the residual `out + gate * spectral(out)` starts as identity.
+        self.spectral_gates = nn.ParameterList()
 
         prev = input_dim
         for i, h in enumerate(hidden_dims):
@@ -176,6 +196,7 @@ class HybridFNOKANPredictor(nn.Module):
 
             if self.use_spectral_mixing and i < len(hidden_dims) - 1:
                 self.spectral_mixings.append(SpectralMixingLayer(h, freq_ratio=spectral_freq_ratio))
+                self.spectral_gates.append(nn.Parameter(torch.zeros(1)))
 
             prev = h
 
@@ -194,7 +215,7 @@ class HybridFNOKANPredictor(nn.Module):
                 out = block(out)
 
             if self.use_spectral_mixing and i < len(self.blocks) - 1:
-                out = out + self.spectral_mixings[spectral_idx](out)
+                out = out + self.spectral_gates[spectral_idx] * self.spectral_mixings[spectral_idx](out)
                 spectral_idx += 1
 
         out = self.head(out)
