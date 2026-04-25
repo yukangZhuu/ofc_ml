@@ -1,271 +1,254 @@
-# OFC 2026 ML Challenge - EDFA Gain Spectrum Prediction
+# OFC 2026 ML Challenge — EDFA Digital Twin
 
-Machine learning pipeline for predicting EDFA gain spectra in the OFC 2026 ML Challenge.
+Experiment-running cheat sheet for the EDFA gain-spectrum prediction project.
+Architecture / methodology details live in [`docs/experiments.md`](docs/experiments.md); this README is purely about **how to run things**.
 
-## Quick Start
+---
+
+## 1. Setup
 
 ```bash
-# Create conda environment
-conda create -n ofc_ml python=3.12
+conda create -n ofc_ml python=3.12 -y
 conda activate ofc_ml
-
-# Install dependencies
 pip install -r requirements.txt
-
-# Run training + generate a submission
-python main.py
+pip install matplotlib jupyter          # notebook extras
 ```
 
-## Project Structure
+Data layout expected by every script:
 
 ```
-ofc_ml/
-├── src/ofc_ml/              # Source code
-│   ├── config.py            # Configuration file
-│   ├── network.py           # Neural network architectures
-│   ├── model.py             # Training logic
-│   ├── features.py          # Feature preprocessing
-│   └── data.py              # Data loading
-├── data/                     # Dataset directory
-├── scripts/                  # Utility scripts
-│   └── cosmos_to_kaggle.py   # COSMOS data converter
-├── submissions/              # Generated submissions
-├── main.py                   # Entry point
-└── requirements.txt          # Dependencies
+data/ofc-2026-ml-challenge/
+    train_features_clean_1.csv
+    train_labels_clean_1.csv
+    test_features.csv
+    test_labels.csv              # post-competition ground truth
+data/cosmos-as-kaggle/
+    train_features.csv
+    train_labels.csv
 ```
 
-## Data Setup
-
-### Kaggle Competition Data
-
-Download the competition files from Kaggle and place them under:
-
-- `data/ofc-2026-ml-challenge/`
-
-Expected files: `train_features.csv`, `train_labels.csv`, `test_features.csv`
-
-### COSMOS-EDFA-Dataset (Optional)
-
-Clone the original dataset repo:
+If `data/cosmos-as-kaggle/` is missing, regenerate it from the COSMOS repo:
 
 ```bash
 git clone https://github.com/functions-lab/COSMOS-EDFA-Dataset.git COSMOS-EDFA-Dataset
-```
-
-Convert COSMOS JSON to Kaggle-style CSV:
-
-```bash
 python scripts/cosmos_to_kaggle.py \
-  --cosmos-dataset-dir COSMOS-EDFA-Dataset/dataset \
-  --out-dir data/cosmos-as-kaggle \
-  --category cosmos \
-  --gains 18dB \
-  --channel-types fix
+    --cosmos-dataset-dir COSMOS-EDFA-Dataset/dataset \
+    --out-dir data/cosmos-as-kaggle \
+    --category cosmos --gains 18dB --channel-types fix
 ```
 
-Note: COSMOS does not contain Kaggle's `aging/shb/unseen` labels; `Category` is filled with a constant.
+---
 
-## Configuration
+## 2. Output layout (multi-seed)
 
-Edit `src/ofc_ml/config.py` to customize training. Configuration is organized into logical groups:
-
-### FEATURE_CONFIG
-
-Feature preprocessing settings:
-
-```python
-FEATURE_CONFIG = {
-    "USE_MASK": "concat",  # Options: "none", "concat", "multiply"
-}
-```
-
-- `"none"`: Do not use mask columns
-- `"concat"`: Concatenate mask columns as input features
-- `"multiply"`: Multiply mask with spectra features (physical channel switch meaning)
-
-### DATASET_CONFIG
-
-Data paths and dataset selection:
-
-```python
-DATA_DIR = PROJECT_ROOT / "data" / "ofc-2026-ml-challenge"
-TRAIN_FEATURES_PATH = DATA_DIR / "train_features.csv"
-TRAIN_LABELS_PATH = DATA_DIR / "train_labels.csv"
-TEST_FEATURES_PATH = DATA_DIR / "test_features.csv"
-COSMOS_DATA_DIR = PROJECT_ROOT / "data" / "cosmos-as-kaggle"
-DATASET_USE = "kaggle"  # Options: "kaggle", "cosmos", "both"
-RANDOM_STATE = 42
-TEST_SIZE = 0.05
-```
-
-### MODEL_CONFIG
-
-HybridFNOKANPredictor hyperparameters:
-
-```python
-MODEL_CONFIG = {
-    "DROPOUT": 0.2,
-    "HIDDEN_DIMS": [256, 256, 128, 128, 128],
-    "N_FREQUENCIES": 4,
-    "SPECTRAL_FREQ_RATIO": 0.5,
-    "USE_SPECTRAL_MIXING": True,
-}
-```
-
-### TRAINING_CONFIG
-
-General training settings:
-
-```python
-TRAINING_CONFIG = {
-    "DEVICE": "cuda",  # "cpu" | "cuda" | "cuda:N"
-    "LOAD_PRETRAINED_MODEL": True,
-    "PRETRAIN_MODEL_PATH": PROJECT_ROOT / "models" / "pretrained_model.pt",
-}
-```
-
-### PRETRAIN_CONFIG
-
-Stage 1: Pretraining on COSMOS dataset:
-
-```python
-PRETRAIN_CONFIG = {
-    "LEARNING_RATE": 0.001,
-    "WEIGHT_DECAY": 1e-4,
-    "BATCH_SIZE": 64,
-    "EPOCHS": 500,
-    "EARLY_STOPPING_PATIENCE": 50,
-}
-```
-
-### FINETUNE_CONFIG
-
-Stage 2: Fine-tuning on Kaggle dataset:
-
-```python
-FINETUNE_CONFIG = {
-    "LEARNING_RATE": 0.0002,
-    "WEIGHT_DECAY": 5e-5,
-    "BATCH_SIZE": 32,
-    "EPOCHS": 1000,
-    "EARLY_STOPPING_PATIENCE": 50,
-    "DISCRIMINATIVE_LR_DECAY": 0.95,
-}
-```
-
-## Model Architecture
-
-The project uses **HybridFNOKANPredictor**, which combines:
-
-- **FourierKAN**: Kolmogorov-Arnold Networks with Fourier basis functions
-- **Spectral Mixing**: Frequency domain mixing layers to capture global dependencies
-
-### Architecture Structure
+Everything under `results/` is per-seed:
 
 ```
-Input (variable dimension based on USE_MASK mode)
-    ↓
-[Early] FourierKAN Block × 2
-    ↓
-SpectralMixingLayer (FNO lightweight version)
-    ↓ Frequency domain global mixing
-    ↓
-[Late] FourierKAN Block × 3
-    ↓
-Output Layer (95 channels)
+results/
+    seed_42/
+        _pretrain_cache/                 # reusable pretrain checkpoints (by arch hash)
+        _run_state.json                  # run_matrix state for seed 42
+        _run_matrix.log                  # append-only log
+        m1_ours/
+            metrics.json                 # evaluation + per-epoch histories (dB units)
+            history.csv                  # long format (stage, epoch, train, val, lr)
+            submission.csv               # aligned test-set predictions
+            model.pt                     # final weights
+            pretrain.pt                  # per-experiment pretrain snapshot (resumable)
+            config.snapshot.yaml         # fully-resolved config (incl. seed)
+            config.source.yaml           # original YAML copy
+            logs/
+        ...
+    seed_43/ …
+    _tables/                             # aggregated paper tables (cross-seed)
+        table{1..4}_<group>_per_seed.csv     # long: one row per (seed, experiment)
+        table{1..4}_<group>_summary.csv      # mean ± std per experiment across seeds
+        figure3_data_scale_*.csv
 ```
 
-### Key Components
+`results/` is gitignored. `_pretrain_cache/` automatically dedupes pretraining across experiments that share the same architecture, seed, and data subsample.
 
-- **SpectralMixingLayer**: Lightweight frequency domain mixing layer that captures global channel dependencies
-- **FourierKANLayer**: Basic KAN layer with Fourier basis
-- **FourierKANBlock**: Complete block with normalization and activation
+---
 
-## Two-Stage Training
+## 3. The 7 useful commands
 
-The framework implements a two-stage transfer learning strategy:
-
-### Stage 1: Pretraining (COSMOS)
-- Train on COSMOS dataset
-- Larger learning rate (0.001)
-- Larger batch size (64)
-- Save model to `models/pretrained_model.pt`
-
-### Stage 2: Fine-tuning (Kaggle)
-- Load pretrained model
-- Fine-tune on Kaggle dataset
-- Smaller learning rate (0.0002)
-- Smaller batch size (32)
-- Discriminative learning rates for different layers
-
-### Training Flow
-
-```
-Check LOAD_PRETRAINED_MODEL and pretrained_model.pt existence
-    ↓
-    ├─→ Load model (skip Stage 1)
-    │
-    └─→ Stage 1: Pretrain on COSMOS
-           ↓
-           Save pretrained model
-           ↓
-           Stage 2: Finetune on Kaggle
-              ↓
-              Generate predictions
-```
-
-### Using Pretrained Model
-
-If `models/pretrained_model.pt` exists and `LOAD_PRETRAINED_MODEL=True`, Stage 1 is skipped:
+### 3.1 Run the whole matrix on one seed
 
 ```bash
-# Use existing pretrained model
-python main.py
-
-# Force retraining from scratch
-python main.py --no-load-pretrained
+python scripts/run_matrix.py --seed 42
 ```
 
-## Dataset Selection
+- Runs the 10 canonical experiments in the order defined at the top of `scripts/run_matrix.py` (lightest first, `m4_transformer` last).
+- Skips any experiment whose `results/seed_42/<exp>/metrics.json` already exists.
+- State is checkpointed in `results/seed_42/_run_state.json` after every experiment, so Ctrl+C is safe — re-run the same command to resume.
 
-Choose dataset by setting `DATASET_USE`:
+Useful extras:
 
-- `"kaggle"`: Use only Kaggle competition data
-- `"cosmos"`: Use only COSMOS dataset
-- `"both"`: Use both datasets (concatenated, recommended for two-stage training)
+```bash
+python scripts/run_matrix.py --seed 42 --dry-run                      # show plan + status
+python scripts/run_matrix.py --seed 42 --only m1_ours a_a1_wo_spectral
+python scripts/run_matrix.py --seed 42 --force                        # re-run everything
+python scripts/run_matrix.py --seed 42 --include-data-scale           # add the 6 data-scale ablations
+python scripts/run_matrix.py --seed 42 --override pretrain.epochs=40 finetune.epochs=80
+```
 
-## Expected Performance
+### 3.2 Run the matrix across multiple seeds
 
-- Validation MSE: ~0.003-0.004
-- Validation RMSE: ~0.05-0.06
-- Prediction mean: ~17-18 dB
+```bash
+python scripts/run_seeds.py --seeds 42 43 44 45 46
+```
 
-## Output
+- Serialises over seeds; each seed is an independent `run_matrix.py --seed S` call.
+- Each seed gets its own checkpoint-resume state, so interrupting and re-running the outer command picks up mid-sweep.
+- Add `--aggregate-after` to regenerate `results/_tables/` when the sweep finishes.
 
-After training, you'll find:
+All `run_matrix.py` flags pass through:
 
-- `models/pretrained_model.pt` - Pretrained model checkpoint
-- `submissions/submission_YYYYMMDD_HHMMSS.csv` - Test predictions
+```bash
+python scripts/run_seeds.py --seeds 43 44 45 --only m1_ours a_a2_wo_fourier_kan
+python scripts/run_seeds.py --seeds 43 44 45 --stop-on-failure
+python scripts/run_seeds.py --seeds 43 44 45 --override pretrain.epochs=60
+```
 
-## Kaggle Submission
+### 3.3 Run a single experiment
 
-1. Find latest submission: `ls -lt submissions/`
-2. Upload to [Kaggle](https://www.kaggle.com/competitions/ofc-2026-ml-challenge/submissions)
-3. View results on leaderboard
+```bash
+python scripts/run_experiment.py --config experiments/main/m1_ours.yaml --seed 42
+python scripts/run_experiment.py --config experiments/ablation/physics/a_p1_predict_absolute.yaml \
+                                 --seed 43 --force --override finetune.epochs=120
+```
 
-## Troubleshooting
+The `--seed` flag:
+- overrides `cfg.seed` and `cfg.data.random_state`
+- scopes all outputs to `results/seed_<SEED>/<exp_name>/`
 
-**Import error?** Run from project root: `python main.py`
+### 3.4 Resume a fine-tune from a specific pretrain snapshot
 
-**Out of memory?** Reduce batch size in `config.py`
+Every pretrain-containing run writes `results/seed_<S>/<exp>/pretrain.pt`. To start a new fine-tune from someone else's pretrain:
 
-**Slow training?** Use GPU via `DEVICE="cuda:N"` in `config.py`
+```bash
+python scripts/run_experiment.py \
+    --config experiments/ablation/transfer/a_t2_no_pretrain.yaml \
+    --seed 42 \
+    --override pretrain_weights_path=results/seed_42/m1_ours/pretrain.pt
+```
 
-**Poor predictions?** Verify masked loss is used and check data preprocessing
+The runner loads the weights, skips the `pretrain` stage, and proceeds to `finetune` / `joint`.
 
-## Requirements
+### 3.5 Aggregate across seeds
 
-- Python 3.12+
-- PyTorch, scikit-learn, pandas, numpy
+```bash
+python scripts/aggregate_results.py                   # auto-discover all seed_* dirs
+python scripts/aggregate_results.py --seeds 42 43 44  # restrict to a subset
+```
 
-See `requirements.txt` for versions.
+Produces four table groups (main / transfer / arch / physics) plus one data-scale table. For each group:
+- `results/_tables/<group>_per_seed.csv` — long format (one row per seed × experiment)
+- `results/_tables/<group>_summary.csv` — one row per experiment with `MAE_dB_mean`, `MAE_dB_std`, `MAE_dB_str = "0.0998 ± 0.0023"`, etc.
+
+All dB columns carry an explicit `_dB` suffix; MSE uses `_dB2`.
+
+### 3.6 Visualise in the notebook
+
+```bash
+jupyter notebook notebooks/results_viz.ipynb
+```
+
+- §§1–5 inspect a single seed (set `SEED` in the first cell; defaults to the first seed found).
+- §6 dumps `_tables/*.csv` inline.
+- §7 plots cross-seed bar charts with error bars from `*_summary.csv`.
+- §8 overlays per-seed training curves for stability checks.
+
+### 3.7 Sanity / smoke tests
+
+```bash
+# Smallest possible end-to-end run (<30s on CPU); proves the pipeline works.
+python scripts/run_experiment.py \
+    --config experiments/main/m1_ours.yaml --seed 999 --force --no-cache \
+    --override pretrain.epochs=2 finetune.epochs=3 pretrain.val_every_n_epochs=1 \
+               finetune.val_every_n_epochs=1 data.cosmos_ratio=0.005
+
+# Legacy test scripts (pre-refactor pipeline):
+python tests/test_pipeline.py
+python test_interleaved.py
+```
+
+---
+
+## 4. Typical workflows
+
+### A. Quick single-seed iteration (developing / debugging)
+
+```bash
+python scripts/run_matrix.py --seed 42 --only m1_ours
+jupyter notebook notebooks/results_viz.ipynb   # §§1-5 only
+```
+
+### B. Full five-seed sweep for a paper table
+
+```bash
+python scripts/run_seeds.py --seeds 42 43 44 45 46 --aggregate-after
+# inspect results/_tables/table*_summary.csv
+# or open notebooks/results_viz.ipynb → §§6-8
+```
+
+### C. Re-running just one ablation across seeds
+
+```bash
+python scripts/run_seeds.py --seeds 42 43 44 --only a_a1_wo_spectral --force
+python scripts/aggregate_results.py
+```
+
+### D. Running an additional seed without touching existing ones
+
+```bash
+python scripts/run_matrix.py --seed 47          # prior seeds untouched
+python scripts/aggregate_results.py             # tables now include seed 47
+```
+
+---
+
+## 5. Experiment catalogue
+
+Defined under `experiments/` as overlayed YAMLs (`base:` chain). Execute any of these by YAML path or stem with `--only <stem>`.
+
+| YAML | Stem | Purpose |
+|------|------|---------|
+| `experiments/main/m1_ours.yaml`                            | `m1_ours`              | Full HybridFNOKAN (our method) |
+| `experiments/main/m2_mlp.yaml`                              | `m2_mlp`               | Same-capacity MLP baseline |
+| `experiments/main/m3_cnn1d.yaml`                            | `m3_cnn1d`             | 1D CNN baseline |
+| `experiments/main/m4_transformer.yaml`                      | `m4_transformer`       | Transformer baseline (channel-as-token) |
+| `experiments/ablation/transfer/a_t1_no_finetune.yaml`       | `a_t1_no_finetune`     | Use pretrained weights zero-shot |
+| `experiments/ablation/transfer/a_t2_no_pretrain.yaml`       | `a_t2_no_pretrain`     | Kaggle from scratch |
+| `experiments/ablation/transfer/a_t3_joint.yaml`             | `a_t3_joint`           | Single stage on COSMOS ∪ Kaggle |
+| `experiments/ablation/arch/a_a1_wo_spectral.yaml`           | `a_a1_wo_spectral`     | Disable SpectralMixing |
+| `experiments/ablation/arch/a_a2_wo_fourier_kan.yaml`        | `a_a2_wo_fourier_kan`  | Replace FourierKAN blocks with MLP blocks |
+| `experiments/ablation/physics/a_p1_predict_absolute.yaml`   | `a_p1_predict_absolute`| Predict absolute gain, no baseline-residual parameterisation |
+| `experiments/ablation/data_scale/pretrain_{25,50,100}.yaml` | `ds_pretrain_<R>`      | Data-scale scan over COSMOS ratio |
+| `experiments/ablation/data_scale/finetune_{25,50,100}.yaml` | `ds_finetune_<R>`      | Data-scale scan over Kaggle ratio |
+
+The matrix runner schedules items in an order chosen to maximise pretrain-cache reuse and to defer heavy models (Transformer) to the end; see top of `scripts/run_matrix.py` to adjust.
+
+---
+
+## 6. Configuration override cheat sheet
+
+Any YAML field is overridable from the CLI as `key.subkey=value`:
+
+```bash
+python scripts/run_experiment.py --config experiments/main/m1_ours.yaml --seed 42 \
+    --override device=cuda:0 pretrain.batch_size=512 finetune.epochs=120 \
+               model.dropout=0.1 model.use_spectral_mixing=false \
+               data.cosmos_ratio=0.5
+```
+
+Most common knobs: see [`experiments/base.yaml`](experiments/base.yaml).
+
+---
+
+## 7. Troubleshooting
+
+- **`missing key(s) in state_dict: "spectral_gates.0"`**: a pretrain checkpoint produced by the old SpectralMixing code is being loaded into the new model. Clear the cache with `rm -rf results/seed_<S>/_pretrain_cache` and re-run.
+- **Numbers for one experiment look identical to another**: pretrain cache reused across seeds if you forget `--seed`. Each seed owns a separate `results/seed_<S>/_pretrain_cache/`, so simply always pass `--seed`.
+- **Out of memory on MPS/CUDA**: `--override pretrain.batch_size=128 finetune.batch_size=32`.
+- **Jupyter can't find the package**: the notebook adds `src/` to `sys.path` from the first cell; if you run scripts from a different CWD, `cd` into the repo root first.
