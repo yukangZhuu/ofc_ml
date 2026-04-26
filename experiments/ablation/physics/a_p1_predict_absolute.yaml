@@ -8,7 +8,7 @@ name: a_p1_predict_absolute
 # target parameterization.
 model:
   name: hybrid_fno_kan
-  use_spectral_mixing: true
+  use_spectral_mixing: false
   use_fourier_kan: true
   predict_absolute: true
 

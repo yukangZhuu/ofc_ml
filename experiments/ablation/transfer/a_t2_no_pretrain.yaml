@@ -6,7 +6,7 @@ name: a_t2_no_pretrain
 # chance to converge from random initialization on the small Kaggle set.
 model:
   name: hybrid_fno_kan
-  use_spectral_mixing: true
+  use_spectral_mixing: false
   use_fourier_kan: true
 
 stages: [finetune]

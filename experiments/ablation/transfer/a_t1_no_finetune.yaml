@@ -5,7 +5,7 @@ name: a_t1_no_finetune
 # Reuses the pretrain cache of m1_ours (same arch + cosmos_ratio + seed).
 model:
   name: hybrid_fno_kan
-  use_spectral_mixing: true
+  use_spectral_mixing: false
   use_fourier_kan: true
 
 stages: [pretrain]

@@ -6,7 +6,7 @@ name: a_t3_joint
 # simpler "pool the datasets together and train once" baseline.
 model:
   name: hybrid_fno_kan
-  use_spectral_mixing: true
+  use_spectral_mixing: false
   use_fourier_kan: true
 
 stages: [joint]

@@ -104,25 +104,29 @@ respective training set). Seed is fixed at `RANDOM_STATE=42`.
 ```
 Input (≈204 dims)
   ↓
-[ FourierKAN block ]    + residual Linear   ┐
-  ↓                                         │ × 5 blocks
-[ SpectralMixing (rFFT → learnable         │   (mixing inserted after blocks
-  low-freq weight → irFFT) ]                │    1..4, not after block 5)
-  ↓                                         ┘
+[ FourierKAN block ] + residual Linear   ┐
+  ↓                                      │ × 5 blocks
 Linear head → 95-dim gain-spectrum offset
   ↓
 mask ⊙ output
 ```
+
+Earlier versions of the code included an optional gated FNO-style
+`SpectralMixingLayer`, but multi-seed diagnostics showed that the learned gates
+remain close to zero and that the extra module does not provide a statistically
+stable gain on this dataset.  The paper therefore uses the simpler FourierKAN
+backbone as the main architecture and focuses the ablation study on transfer
+learning and the physics-grounded target parameterization.
 
 Parameter counts (within ±10 % of M-1):
 
 
 | Model                              | #params |
 | ---------------------------------- | ------- |
-| M-1 Ours (FourierKAN + FNO)        | 291,807 |
-| M-2 MLP (same-size)                | 284,255 |
-| M-3 CNN1D                          | 281,953 |
-| M-4 Transformer (channel-as-token) | 310,177 |
+| M-1 Ours (FourierKAN)              | ~290k   |
+| M-2 MLP (same-size)                | ~283k   |
+| M-3 CNN1D                          | ~281k   |
+| M-4 Transformer (channel-as-token) | ~310k   |
 
 
 ### 1.8 Reproducibility
@@ -148,18 +152,17 @@ graph TD
     Root[EDFA Digital Twin Experiments]
     Root --> Main[Main Results]
     Root --> Abl[Ablations]
-    Main --> M1[M-1 Ours Full]
+    Main --> M1[M-1 Ours FourierKAN]
     Main --> M2[M-2 MLP Same-Size]
     Main --> M3[M-3 CNN1D]
     Main --> M4[M-4 Transformer]
     Abl --> T[Transfer]
-    Abl --> A[Arch]
+    Abl --> P[Physics baseline]
     Abl --> D[Data scale]
     T --> T1[A-T1 No Finetune]
     T --> T2[A-T2 No Pretrain]
     T --> T3[A-T3 Joint Merge]
-    A --> A1[A-A1 wo SpectralMix]
-    A --> A2[A-A2 wo FourierKAN]
+    P --> P1[A-P1 Predict Absolute]
     D --> Dp[Pretrain 25 50 100]
     D --> Df[Finetune 25 50 100]
 ```
@@ -185,16 +188,16 @@ Source: `[results/_tables/table2_transfer.csv](../results/_tables/table2_transfe
 - `A-T2 No-Pretrain` — train from scratch on Kaggle only
 - `A-T3 Joint`      — single stage on `concat(COSMOS, Kaggle)`
 
-### 2.3 Architectural ablation (Table 3)
+### 2.3 Physics-baseline ablation (Table 3)
 
-Isolates the two architectural claims of the paper.
-Source: `[results/_tables/table3_arch.csv](../results/_tables/table3_arch.csv)`.
+Isolates the target parameterization claim: predicting the residual offset
+around the analytical `target_gain + target_gain_tilt` baseline versus directly
+regressing the full absolute gain spectrum. Source:
+`[results/_tables/table3_physics_summary.csv](../results/_tables/table3_physics_summary.csv)`.
 
-- `M-1 Ours`            — FourierKAN ✓ + SpectralMixing ✓ (reference)
-- `A-A1 w/o SpectralMix` — FourierKAN ✓ + SpectralMixing ✗
-- `A-A2 w/o FourierKAN`  — FourierKAN ✗ + SpectralMixing ✓
-- `M-2 MLP` (same-size)  — FourierKAN ✗ + SpectralMixing ✗ (both off, strong
-degenerate baseline; footnote in Table 3)
+- `M-1 Ours` — predict residual offset and add the physical baseline back at inference.
+- `A-P1 Predict Absolute` — same FourierKAN backbone and transfer protocol, but regress
+  `calculated_gain_spectra_*` directly.
 
 ### 2.4 Data-scale ablation (Figure 3)
 
@@ -224,8 +227,8 @@ python scripts/cosmos_to_kaggle.py \
     --out-dir data/cosmos-as-kaggle \
     --category cosmos --gains 18dB --channel-types fix
 
-# 3. Run all 15 experiments (skips any that already have metrics.json)
-python scripts/run_all.py
+# 3. Run the default paper matrix (main + transfer + physics; data-scale optional)
+python scripts/run_matrix.py
 
 # 4. Aggregate into paper-ready tables
 python scripts/aggregate_results.py
@@ -234,17 +237,18 @@ python scripts/aggregate_results.py
 ### 3.2 Running subsets
 
 ```bash
-python scripts/run_all.py --only main                  # only 4 main experiments
-python scripts/run_all.py --only ablation/arch         # only A-A1, A-A2
-python scripts/run_all.py --only ablation/data_scale   # only the 6 scan points
-python scripts/run_all.py --force                      # re-run from scratch
+python scripts/run_matrix.py --only m1_ours m2_mlp m3_cnn1d m4_transformer
+python scripts/run_matrix.py --only a_t1_no_finetune a_t2_no_pretrain a_t3_joint
+python scripts/run_matrix.py --only a_p1_predict_absolute
+python scripts/run_matrix.py --include-data-scale
+python scripts/run_matrix.py --force
 ```
 
 ### 3.3 Overriding hyperparameters on the fly
 
 ```bash
 # Shorten for a smoke test
-python scripts/run_all.py --override pretrain.epochs=30 finetune.epochs=60
+python scripts/run_matrix.py --override pretrain.epochs=30 finetune.epochs=60
 
 # Run m1_ours on CUDA with a different batch size
 python scripts/run_experiment.py --config experiments/main/m1_ours.yaml \
@@ -253,8 +257,8 @@ python scripts/run_experiment.py --config experiments/main/m1_ours.yaml \
 
 ### 3.4 Recommended compute
 
-- Main + Ablations = **15 experiments, ~8 unique pre-training runs**
-(the rest reuse the cached pretrain checkpoints).
+- Default matrix = **8 experiments** (4 main + 3 transfer + 1 physics ablation);
+  data-scale adds 6 optional runs.
 - ~30 min on a single A100 (500 epochs); ~4–6 hours on MPS (Apple Silicon);
 ~60–90 min on a modern 16-core CPU.
 

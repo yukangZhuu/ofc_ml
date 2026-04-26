@@ -35,7 +35,6 @@ OUT_DIR = RESULTS_ROOT / "_tables"
 # Canonical experiment groupings (order matters for table column layout).
 MAIN_EXPS      = ["m1_ours", "m2_mlp", "m3_cnn1d", "m4_transformer"]
 TRANSFER_EXPS  = ["m1_ours", "a_t1_no_finetune", "a_t2_no_pretrain", "a_t3_joint"]
-ARCH_EXPS      = ["m1_ours", "a_a1_wo_spectral", "a_a2_wo_fourier_kan", "m2_mlp"]
 PHYSICS_EXPS   = ["m1_ours", "a_p1_predict_absolute"]
 DATA_SCALE_EXPS = [
     "ds_pretrain_25", "ds_pretrain_50", "ds_pretrain_100",
@@ -250,8 +249,7 @@ def main():
     groups: List[Tuple[str, List[str]]] = [
         ("table1_main",     MAIN_EXPS),
         ("table2_transfer", TRANSFER_EXPS),
-        ("table3_arch",     ARCH_EXPS),
-        ("table4_physics",  PHYSICS_EXPS),
+        ("table3_physics",  PHYSICS_EXPS),
     ]
     for name, exps in groups:
         long_df = per_seed_long_table(exps, seeds, results_root=RESULTS_ROOT)

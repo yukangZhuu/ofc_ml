@@ -65,29 +65,26 @@ def seed_results_root(seed: int) -> Path:
 # Experiment ordering                                                #
 # ------------------------------------------------------------------ #
 # Chosen to schedule light / cache-reusing cells first and the heavy
-# Transformer run last.  `data_scale` experiments are intentionally
-# excluded per project policy; point `--include-data-scale` at this
-# script to flip that bit.
+# Transformer run last.  Architecture ablations are intentionally omitted:
+# the paper's ablations now focus on transfer learning and the physics
+# baseline target parameterisation.  `data_scale` experiments are also
+# excluded by default; pass `--include-data-scale` to include them.
 ORDERED_EXPERIMENTS: List[str] = [
     # 1. Cheapest: reuses m1 pretrain cache (or runs it itself).
     "experiments/ablation/transfer/a_t1_no_finetune.yaml",
-    # 2. Hybrid variant, similar cost to m1.
-    "experiments/ablation/arch/a_a1_wo_spectral.yaml",
-    # 3. Hybrid with MLP blocks — slightly faster per step.
-    "experiments/ablation/arch/a_a2_wo_fourier_kan.yaml",
-    # 4. Reference main result; populates pretrain cache reused above.
+    # 2. Reference main result; populates pretrain cache reused above.
     "experiments/main/m1_ours.yaml",
-    # 5. Same arch as m1, different target parameterization.
+    # 3. Same arch as m1, different target parameterization.
     "experiments/ablation/physics/a_p1_predict_absolute.yaml",
-    # 6. Same-size MLP baseline.
+    # 4. Same-size MLP baseline.
     "experiments/main/m2_mlp.yaml",
-    # 7. Kaggle-only, fast per epoch but many epochs.
+    # 5. Kaggle-only, fast per epoch but many epochs.
     "experiments/ablation/transfer/a_t2_no_pretrain.yaml",
-    # 8. Joint pretrain+finetune merge.
+    # 6. Joint pretrain+finetune merge.
     "experiments/ablation/transfer/a_t3_joint.yaml",
-    # 9. Medium-weight 1D CNN baseline.
+    # 7. Medium-weight 1D CNN baseline.
     "experiments/main/m3_cnn1d.yaml",
-    # 10. Heaviest — last.
+    # 8. Heaviest — last.
     "experiments/main/m4_transformer.yaml",
 ]
 
