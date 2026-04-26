@@ -46,7 +46,7 @@ Everything under `results/` is per-seed:
 ```
 results/
     seed_42/
-        _pretrain_cache/                 # reusable pretrain checkpoints (by arch hash)
+        _pretrain_cache/                 # reusable pretrain checkpoints (by model/config hash)
         _run_state.json                  # run_matrix state for seed 42
         _run_matrix.log                  # append-only log
         m1_ours/
@@ -61,12 +61,12 @@ results/
         ...
     seed_43/ …
     _tables/                             # aggregated paper tables (cross-seed)
-        table{1..4}_<group>_per_seed.csv     # long: one row per (seed, experiment)
-        table{1..4}_<group>_summary.csv      # mean ± std per experiment across seeds
+        table{1..3}_<group>_per_seed.csv     # long: one row per (seed, experiment)
+        table{1..3}_<group>_summary.csv      # mean ± std per experiment across seeds
         figure3_data_scale_*.csv
 ```
 
-`results/` is gitignored. `_pretrain_cache/` automatically dedupes pretraining across experiments that share the same architecture, seed, and data subsample.
+`results/` is gitignored. `_pretrain_cache/` automatically dedupes pretraining across experiments that share the same model config, seed, and data subsample.
 
 ---
 
@@ -78,7 +78,7 @@ results/
 python scripts/run_matrix.py --seed 42
 ```
 
-- Runs the 10 canonical experiments in the order defined at the top of `scripts/run_matrix.py` (lightest first, `m4_transformer` last).
+- Runs the 8 canonical experiments in the order defined at the top of `scripts/run_matrix.py` (lightest first, `m4_transformer` last).
 - Skips any experiment whose `results/seed_42/<exp>/metrics.json` already exists.
 - State is checkpointed in `results/seed_42/_run_state.json` after every experiment, so Ctrl+C is safe — re-run the same command to resume.
 
@@ -86,7 +86,7 @@ Useful extras:
 
 ```bash
 python scripts/run_matrix.py --seed 42 --dry-run                      # show plan + status
-python scripts/run_matrix.py --seed 42 --only m1_ours a_a1_wo_spectral
+python scripts/run_matrix.py --seed 42 --only m1_ours a_p1_predict_absolute
 python scripts/run_matrix.py --seed 42 --force                        # re-run everything
 python scripts/run_matrix.py --seed 42 --include-data-scale           # add the 6 data-scale ablations
 python scripts/run_matrix.py --seed 42 --override pretrain.epochs=40 finetune.epochs=80
@@ -105,7 +105,7 @@ python scripts/run_seeds.py --seeds 42 43 44 45 46
 All `run_matrix.py` flags pass through:
 
 ```bash
-python scripts/run_seeds.py --seeds 43 44 45 --only m1_ours a_a2_wo_fourier_kan
+python scripts/run_seeds.py --seeds 43 44 45 --only m1_ours a_p1_predict_absolute
 python scripts/run_seeds.py --seeds 43 44 45 --stop-on-failure
 python scripts/run_seeds.py --seeds 43 44 45 --override pretrain.epochs=60
 ```
@@ -142,7 +142,7 @@ python scripts/aggregate_results.py                   # auto-discover all seed_*
 python scripts/aggregate_results.py --seeds 42 43 44  # restrict to a subset
 ```
 
-Produces four table groups (main / transfer / arch / physics) plus one data-scale table. For each group:
+Produces three table groups (main / transfer / physics) plus one optional data-scale table. For each group:
 - `results/_tables/<group>_per_seed.csv` — long format (one row per seed × experiment)
 - `results/_tables/<group>_summary.csv` — one row per experiment with `MAE_dB_mean`, `MAE_dB_std`, `MAE_dB_str = "0.0998 ± 0.0023"`, etc.
 
@@ -195,7 +195,7 @@ python scripts/run_seeds.py --seeds 42 43 44 45 46 --aggregate-after
 ### C. Re-running just one ablation across seeds
 
 ```bash
-python scripts/run_seeds.py --seeds 42 43 44 --only a_a1_wo_spectral --force
+python scripts/run_seeds.py --seeds 42 43 44 --only a_p1_predict_absolute --force
 python scripts/aggregate_results.py
 ```
 
@@ -214,15 +214,13 @@ Defined under `experiments/` as overlayed YAMLs (`base:` chain). Execute any of 
 
 | YAML | Stem | Purpose |
 |------|------|---------|
-| `experiments/main/m1_ours.yaml`                            | `m1_ours`              | Full HybridFNOKAN (our method) |
+| `experiments/main/m1_ours.yaml`                            | `m1_ours`              | Ours: FourierKAN + physics residual target + pretrain→finetune |
 | `experiments/main/m2_mlp.yaml`                              | `m2_mlp`               | Same-capacity MLP baseline |
 | `experiments/main/m3_cnn1d.yaml`                            | `m3_cnn1d`             | 1D CNN baseline |
 | `experiments/main/m4_transformer.yaml`                      | `m4_transformer`       | Transformer baseline (channel-as-token) |
 | `experiments/ablation/transfer/a_t1_no_finetune.yaml`       | `a_t1_no_finetune`     | Use pretrained weights zero-shot |
 | `experiments/ablation/transfer/a_t2_no_pretrain.yaml`       | `a_t2_no_pretrain`     | Kaggle from scratch |
 | `experiments/ablation/transfer/a_t3_joint.yaml`             | `a_t3_joint`           | Single stage on COSMOS ∪ Kaggle |
-| `experiments/ablation/arch/a_a1_wo_spectral.yaml`           | `a_a1_wo_spectral`     | Disable SpectralMixing |
-| `experiments/ablation/arch/a_a2_wo_fourier_kan.yaml`        | `a_a2_wo_fourier_kan`  | Replace FourierKAN blocks with MLP blocks |
 | `experiments/ablation/physics/a_p1_predict_absolute.yaml`   | `a_p1_predict_absolute`| Predict absolute gain, no baseline-residual parameterisation |
 | `experiments/ablation/data_scale/pretrain_{25,50,100}.yaml` | `ds_pretrain_<R>`      | Data-scale scan over COSMOS ratio |
 | `experiments/ablation/data_scale/finetune_{25,50,100}.yaml` | `ds_finetune_<R>`      | Data-scale scan over Kaggle ratio |
@@ -238,7 +236,7 @@ Any YAML field is overridable from the CLI as `key.subkey=value`:
 ```bash
 python scripts/run_experiment.py --config experiments/main/m1_ours.yaml --seed 42 \
     --override device=cuda:0 pretrain.batch_size=512 finetune.epochs=120 \
-               model.dropout=0.1 model.use_spectral_mixing=false \
+               model.dropout=0.1 \
                data.cosmos_ratio=0.5
 ```
 
@@ -248,7 +246,7 @@ Most common knobs: see [`experiments/base.yaml`](experiments/base.yaml).
 
 ## 7. Troubleshooting
 
-- **`missing key(s) in state_dict: "spectral_gates.0"`**: a pretrain checkpoint produced by the old SpectralMixing code is being loaded into the new model. Clear the cache with `rm -rf results/seed_<S>/_pretrain_cache` and re-run.
+- **Unexpected stale numbers after config changes**: clear cached pretraining and runner state with `rm -rf results/seed_<S>/_pretrain_cache && rm -f results/seed_<S>/_run_state.json`, then re-run with `--force`.
 - **Numbers for one experiment look identical to another**: pretrain cache reused across seeds if you forget `--seed`. Each seed owns a separate `results/seed_<S>/_pretrain_cache/`, so simply always pass `--seed`.
 - **Out of memory on MPS/CUDA**: `--override pretrain.batch_size=128 finetune.batch_size=32`.
 - **Jupyter can't find the package**: the notebook adds `src/` to `sys.path` from the first cell; if you run scripts from a different CWD, `cd` into the repo root first.
