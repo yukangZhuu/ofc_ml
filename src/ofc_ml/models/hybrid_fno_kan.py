@@ -175,11 +175,11 @@ class HybridFNOKANPredictor(nn.Module):
 
         self.blocks = nn.ModuleList()
         self.proj = nn.ModuleList()
-        self.spectral_mixings = nn.ModuleList()
-        # One learnable scalar per spectral-mixing layer; initialised to 0 so
-        # the residual `out + gate * spectral(out)` starts as identity.
-        self.spectral_gates = nn.ParameterList()
 
+        # Build the KAN/MLP backbone and output head before constructing any
+        # spectral modules.  This keeps the backbone's RNG stream identical
+        # between `use_spectral_mixing=True` and `False`, which makes the
+        # spectral ablation a fair same-seed comparison.
         prev = input_dim
         for i, h in enumerate(hidden_dims):
             if use_fourier_kan:
@@ -194,16 +194,21 @@ class HybridFNOKANPredictor(nn.Module):
             else:
                 self.proj.append(nn.Identity())
 
-            if self.use_spectral_mixing and i < len(hidden_dims) - 1:
-                self.spectral_mixings.append(SpectralMixingLayer(h, freq_ratio=spectral_freq_ratio))
-                self.spectral_gates.append(nn.Parameter(torch.zeros(1)))
-
             prev = h
 
         self.head = nn.Linear(prev, output_dim)
         nn.init.xavier_uniform_(self.head.weight)
         if self.head.bias is not None:
             nn.init.constant_(self.head.bias, 0.0)
+
+        self.spectral_mixings = nn.ModuleList()
+        # One learnable scalar per spectral-mixing layer; initialised to 0 so
+        # the residual `out + gate * spectral(out)` starts as identity.
+        self.spectral_gates = nn.ParameterList()
+        if self.use_spectral_mixing:
+            for h in hidden_dims[:-1]:
+                self.spectral_mixings.append(SpectralMixingLayer(h, freq_ratio=spectral_freq_ratio))
+                self.spectral_gates.append(nn.Parameter(torch.zeros(1)))
 
     def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         out = x

@@ -51,6 +51,9 @@ from .models import build_model, count_parameters
 from .network import OFCDataset, compute_baseline_gain
 
 
+CACHE_VERSION = "fno_zero_high_modes_gated_rng_fair_stage_seed_v4"
+
+
 # ---------------------------------------------------------------------- #
 # Device selection                                                       #
 # ---------------------------------------------------------------------- #
@@ -192,7 +195,16 @@ def make_dataloaders(
 
     nw = 4 if device.type == "cuda" else 0
     pin = device.type == "cuda"
-    train_loader = DataLoader(tr, batch_size=batch_size, shuffle=True,  num_workers=nw, pin_memory=pin)
+    generator = torch.Generator()
+    generator.manual_seed(int(random_state))
+    train_loader = DataLoader(
+        tr,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=nw,
+        pin_memory=pin,
+        generator=generator,
+    )
     val_loader   = DataLoader(val, batch_size=batch_size, shuffle=False, num_workers=nw, pin_memory=pin)
     return train_loader, val_loader
 
@@ -415,6 +427,18 @@ def _run_stage(
 ) -> StageResult:
     if not stage_cfg.enabled:
         raise ValueError(f"Stage '{title}' invoked but stage_cfg.enabled is False")
+    title_lower = title.lower()
+    if "pretrain" in title_lower:
+        stage_seed = int(random_state) + 1000
+    elif "finetune" in title_lower:
+        stage_seed = int(random_state) + 2000
+    elif "joint" in title_lower:
+        stage_seed = int(random_state) + 3000
+    else:
+        stage_seed = int(random_state)
+    torch.manual_seed(stage_seed)
+    if device.type == "cuda":
+        torch.cuda.manual_seed_all(stage_seed)
     train_loader, val_loader = make_dataloaders(
         data["X"], data["y"], data["tg"], data["tgt"], data["mask"],
         batch_size=stage_cfg.batch_size,
@@ -517,6 +541,7 @@ def _arch_signature(cfg: ExperimentConfig, input_dim: int) -> str:
     pretrain outcome, so we can reuse a cached checkpoint.
     """
     key = {
+        "cache_version": CACHE_VERSION,
         "model": cfg.model.__dict__,
         "pretrain": cfg.pretrain.__dict__,
         "cosmos_ratio": cfg.data.cosmos_ratio,
@@ -596,6 +621,13 @@ def orchestrate(
     np.random.seed(cfg.seed)
     model = build_model(cfg.model, input_dim=bundle.input_dim, output_dim=bundle.output_dim).to(device)
     print(f"[orchestrate] model={cfg.model.name} params={count_parameters(model):,}")
+    # Model construction can consume a different amount of RNG depending on
+    # architecture (e.g. enabling SpectralMixing creates extra parameters).
+    # Reset the training RNG after construction so dropout and other training
+    # stochasticity are comparable across same-seed ablations.
+    torch.manual_seed(cfg.seed)
+    if device.type == "cuda":
+        torch.cuda.manual_seed_all(cfg.seed)
 
     stage_results: List[StageResult] = []
     arch_sig = _arch_signature(cfg, bundle.input_dim)
@@ -652,6 +684,7 @@ def orchestrate(
                         "best_loss": res.best_loss,
                         "history": res.history,
                         "arch_sig": arch_sig,
+                        "cache_version": CACHE_VERSION,
                         "model_name": cfg.model.name,
                     },
                     cache_path,
@@ -668,6 +701,7 @@ def orchestrate(
                     "best_loss": stage_results[-1].best_loss,
                     "history": stage_results[-1].history,
                     "arch_sig": arch_sig,
+                    "cache_version": CACHE_VERSION,
                     "model_name": cfg.model.name,
                     "experiment_name": cfg.name,
                     "saved_by": "orchestrate/pretrain",

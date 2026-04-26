@@ -88,7 +88,7 @@ def main():
     if args.seed is not None:
         cfg.seed = int(args.seed)
         cfg.data.random_state = int(args.seed)
-        cfg.results_root = Path(f"results/seed_{args.seed}")
+        cfg.results_root = PROJECT_ROOT / "results" / f"seed_{args.seed}"
 
     results_dir = Path(cfg.results_dir)
     if _exists_already(results_dir) and not args.force:
