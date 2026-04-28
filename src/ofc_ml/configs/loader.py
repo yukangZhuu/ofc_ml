@@ -28,6 +28,7 @@ from .schema import (
     FeatureConfig,
     ModelConfig,
     StageConfig,
+    WangTransferConfig,
 )
 
 
@@ -112,6 +113,7 @@ def _coerce_dataclass(cls, payload: Dict[str, Any]):
             ModelConfig,
             StageConfig,
             EvalConfig,
+            WangTransferConfig,
         }:
             kwargs[fname] = _coerce_dataclass(ftype, v)
         elif fname in _PATH_FIELDS:
@@ -143,11 +145,12 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
         "ModelConfig": ModelConfig,
         "StageConfig": StageConfig,
         "EvalConfig": EvalConfig,
+        "WangTransferConfig": WangTransferConfig,
     }
     for f in fields(ExperimentConfig):
         if isinstance(f.type, str) and f.type in _TYPE_MAP:
             f.type = _TYPE_MAP[f.type]
-    for dc in (DataConfig, FeatureConfig, ModelConfig, StageConfig, EvalConfig):
+    for dc in (DataConfig, FeatureConfig, ModelConfig, StageConfig, EvalConfig, WangTransferConfig):
         for f in fields(dc):
             if isinstance(f.type, str) and f.type in _TYPE_MAP:
                 f.type = _TYPE_MAP[f.type]

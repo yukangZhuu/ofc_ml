@@ -64,28 +64,34 @@ def seed_results_root(seed: int) -> Path:
 # ------------------------------------------------------------------ #
 # Experiment ordering                                                #
 # ------------------------------------------------------------------ #
-# Chosen to schedule light / cache-reusing cells first and the heavy
-# Transformer run last.  Architecture ablations are intentionally omitted:
-# the paper's ablations now focus on transfer learning and the physics
-# baseline target parameterisation.  `data_scale` experiments are also
-# excluded by default; pass `--include-data-scale` to include them.
+# Chosen to schedule light / cache-reusing cells first and the heaviest
+# Transformer run last.  Order matters because experiments sharing the same
+# (model, pretrain config, data ratio, seed) hit the same `_pretrain_cache`,
+# so we deliberately schedule the cache-producer *before* its consumers.
+#
+# `data_scale` experiments are excluded by default; pass `--include-data-scale`
+# to add them.
 ORDERED_EXPERIMENTS: List[str] = [
-    # 1. Cheapest: reuses m1 pretrain cache (or runs it itself).
-    "experiments/ablation/transfer/a_t1_no_finetune.yaml",
-    # 2. Reference main result; populates pretrain cache reused above.
+    # 1. Reference main result.  Trains the FourierKAN pretrain cache that
+    #    every other Hybrid-FNO-KAN experiment below will reuse.
     "experiments/main/m1_ours.yaml",
-    # 3. Same arch as m1, different target parameterization.
-    "experiments/ablation/physics/a_p1_predict_absolute.yaml",
-    # 4. Same-size MLP baseline.
-    "experiments/main/m2_mlp.yaml",
-    # 5. Kaggle-only, fast per epoch but many epochs.
-    "experiments/ablation/transfer/a_t2_no_pretrain.yaml",
-    # 6. Joint pretrain+finetune merge.
+    # 2. Pretrain-only (zero-shot transfer); reuses the m1_ours pretrain cache.
+    "experiments/ablation/transfer/a_t1_no_finetune.yaml",
+    # 3. Joint pretrain+finetune merge; same backbone, different protocol.
     "experiments/ablation/transfer/a_t3_joint.yaml",
-    # 7. Medium-weight 1D CNN baseline.
-    "experiments/main/m3_cnn1d.yaml",
-    # 8. Heaviest — last.
-    "experiments/main/m4_transformer.yaml",
+    # 4. Same FourierKAN backbone but trained without the physics baseline.
+    "experiments/ablation/physics/a_p1_predict_absolute.yaml",
+    # 5. Kaggle-only training from scratch (no pretraining at all).
+    "experiments/ablation/transfer/a_t2_no_pretrain.yaml",
+    # 6. Architecture ablation: same-size MLP backbone.
+    "experiments/ablation/architecture/m2_mlp.yaml",
+    # 7. Architecture ablation: 1D CNN backbone.
+    "experiments/ablation/architecture/m3_cnn1d.yaml",
+    # 8. External baseline (Wang et al. 2023): published reference DNN
+    #    + the paper's own three-phase transfer protocol.
+    "experiments/main/m0_wang_dnn.yaml",
+    # 9. Architecture ablation: Transformer backbone (heaviest, run last).
+    "experiments/ablation/architecture/m4_transformer.yaml",
 ]
 
 DATA_SCALE_EXPERIMENTS: List[str] = [

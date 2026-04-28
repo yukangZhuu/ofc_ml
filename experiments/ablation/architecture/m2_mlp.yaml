@@ -1,4 +1,4 @@
-base: ../base.yaml
+base: ../../base.yaml
 name: m2_mlp
 
 model:

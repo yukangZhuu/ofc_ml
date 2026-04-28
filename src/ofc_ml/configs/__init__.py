@@ -5,6 +5,7 @@ from .schema import (
     FeatureConfig,
     ModelConfig,
     StageConfig,
+    WangTransferConfig,
 )
 from .loader import load_experiment_config
 
@@ -15,5 +16,6 @@ __all__ = [
     "FeatureConfig",
     "ModelConfig",
     "StageConfig",
+    "WangTransferConfig",
     "load_experiment_config",
 ]

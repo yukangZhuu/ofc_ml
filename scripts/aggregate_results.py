@@ -33,7 +33,11 @@ RESULTS_ROOT = PROJECT_ROOT / "results"
 OUT_DIR = RESULTS_ROOT / "_tables"
 
 # Canonical experiment groupings (order matters for table column layout).
-MAIN_EXPS      = ["m1_ours", "m2_mlp", "m3_cnn1d", "m4_transformer"]
+# Main = headline external comparison (Ours vs SOTA reference DNN).
+# The other three groups are independent ablations of our three claimed
+# contributions: architecture, transfer learning, physics-baseline target.
+MAIN_EXPS      = ["m0_wang_dnn", "m1_ours"]
+ARCH_EXPS      = ["m1_ours", "m2_mlp", "m3_cnn1d", "m4_transformer"]
 TRANSFER_EXPS  = ["m1_ours", "a_t1_no_finetune", "a_t2_no_pretrain", "a_t3_joint"]
 PHYSICS_EXPS   = ["m1_ours", "a_p1_predict_absolute"]
 DATA_SCALE_EXPS = [
@@ -247,9 +251,10 @@ def main():
     print(f"[aggregate] using seeds: {seeds}")
 
     groups: List[Tuple[str, List[str]]] = [
-        ("table1_main",     MAIN_EXPS),
-        ("table2_transfer", TRANSFER_EXPS),
-        ("table3_physics",  PHYSICS_EXPS),
+        ("table1_main",         MAIN_EXPS),
+        ("table2_architecture", ARCH_EXPS),
+        ("table3_transfer",     TRANSFER_EXPS),
+        ("table4_physics",      PHYSICS_EXPS),
     ]
     for name, exps in groups:
         long_df = per_seed_long_table(exps, seeds, results_root=RESULTS_ROOT)

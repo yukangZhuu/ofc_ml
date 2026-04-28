@@ -51,7 +51,7 @@ from .models import build_model, count_parameters
 from .network import OFCDataset, compute_baseline_gain
 
 
-CACHE_VERSION = "fno_zero_high_modes_gated_rng_fair_stage_seed_v4"
+CACHE_VERSION = "wang_baseline_added_v5"
 
 
 # ---------------------------------------------------------------------- #
@@ -197,6 +197,10 @@ def make_dataloaders(
     pin = device.type == "cuda"
     generator = torch.Generator()
     generator.manual_seed(int(random_state))
+    # `drop_last=True` on the training loader is safe for all models and is
+    # required for BatchNorm-based models (e.g. Wang DNN) on small datasets,
+    # because a residual final batch of size 1 makes BN error out in
+    # training mode.  At most `batch_size - 1` samples per epoch are skipped.
     train_loader = DataLoader(
         tr,
         batch_size=batch_size,
@@ -204,14 +208,26 @@ def make_dataloaders(
         num_workers=nw,
         pin_memory=pin,
         generator=generator,
+        drop_last=True,
     )
-    val_loader   = DataLoader(val, batch_size=batch_size, shuffle=False, num_workers=nw, pin_memory=pin)
+    val_loader = DataLoader(val, batch_size=batch_size, shuffle=False, num_workers=nw, pin_memory=pin)
     return train_loader, val_loader
 
 
 # ---------------------------------------------------------------------- #
 # Trainer                                                                #
 # ---------------------------------------------------------------------- #
+def _set_bn_eval(module: nn.Module) -> None:
+    """Force every BatchNorm submodule into eval mode.
+
+    Used by Wang's three-phase transfer (Phase B) so the small target dataset
+    does not overwrite the running statistics learned during pretraining.
+    """
+    for m in module.modules():
+        if isinstance(m, nn.modules.batchnorm._BatchNorm):
+            m.eval()
+
+
 class Trainer:
     """A small training loop with validation, scheduler, and early stopping."""
 
@@ -222,15 +238,19 @@ class Trainer:
         criterion: Optional[nn.Module] = None,
         use_amp: bool = False,
         grad_clip: float = 1.0,
+        freeze_bn: bool = False,
     ):
         self.model = model.to(device)
         self.device = device
         self.criterion = criterion or MaskedMSELoss()
         self.scaler = GradScaler() if (use_amp and device.type == "cuda") else None
         self.grad_clip = float(grad_clip)
+        self.freeze_bn = bool(freeze_bn)
 
     def _train_epoch(self, loader: DataLoader, optimizer) -> float:
         self.model.train()
+        if self.freeze_bn:
+            _set_bn_eval(self.model)
         total, denom = 0.0, 0.0
         for batch in loader:
             X, y, _, _, mask = [b.to(self.device, non_blocking=True) for b in batch]
@@ -317,12 +337,23 @@ class Trainer:
         return best, history
 
 
-def build_optimizer(model: nn.Module, stage: StageConfig) -> torch.optim.Optimizer:
+def build_optimizer(model: nn.Module, stage: StageConfig, params=None) -> torch.optim.Optimizer:
+    """Build an optimizer for `stage`.
+
+    By default it operates over all of `model.parameters()`; pass `params`
+    explicitly (e.g. only the head parameters during Wang transfer Phase A) to
+    restrict the parameter group.
+    """
+    if params is None:
+        params = model.parameters()
     opt = stage.optimizer.lower()
     if opt == "adam":
-        return optim.Adam(model.parameters(), lr=stage.learning_rate, weight_decay=stage.weight_decay)
+        return optim.Adam(params, lr=stage.learning_rate, weight_decay=stage.weight_decay)
     if opt == "adamw":
-        return optim.AdamW(model.parameters(), lr=stage.learning_rate, weight_decay=stage.weight_decay)
+        return optim.AdamW(params, lr=stage.learning_rate, weight_decay=stage.weight_decay)
+    if opt == "sgd":
+        momentum = float(getattr(stage, "momentum", 0.9))
+        return optim.SGD(params, lr=stage.learning_rate, weight_decay=stage.weight_decay, momentum=momentum)
     raise ValueError(f"Unknown optimizer: {stage.optimizer!r}")
 
 
@@ -428,7 +459,11 @@ def _run_stage(
     if not stage_cfg.enabled:
         raise ValueError(f"Stage '{title}' invoked but stage_cfg.enabled is False")
     title_lower = title.lower()
-    if "pretrain" in title_lower:
+    if "wang_transfer_phase_a" in title_lower:
+        stage_seed = int(random_state) + 4001
+    elif "wang_transfer_phase_b" in title_lower:
+        stage_seed = int(random_state) + 4002
+    elif "pretrain" in title_lower:
         stage_seed = int(random_state) + 1000
     elif "finetune" in title_lower:
         stage_seed = int(random_state) + 2000
@@ -447,7 +482,12 @@ def _run_stage(
         device=device,
     )
     criterion = build_loss(stage_cfg.loss)
-    trainer = Trainer(model, device, criterion=criterion, grad_clip=stage_cfg.grad_clip)
+    trainer = Trainer(
+        model, device,
+        criterion=criterion,
+        grad_clip=stage_cfg.grad_clip,
+        freeze_bn=getattr(stage_cfg, "freeze_bn", False),
+    )
     optimizer = build_optimizer(model, stage_cfg)
     scheduler = build_scheduler(optimizer, stage_cfg)
     best, history = trainer.fit(
@@ -492,6 +532,182 @@ def run_joint(model, device, cfg: ExperimentConfig, bundle: DatasetBundle) -> St
         model, device, cfg.joint, joined,
         val_size=cfg.data.val_size, random_state=cfg.data.random_state,
         title="joint",
+    )
+
+
+# ---------------------------------------------------------------------- #
+# Wang et al. 2023 three-phase transfer                                   #
+# ---------------------------------------------------------------------- #
+def _run_phase(
+    model: nn.Module,
+    device: torch.device,
+    data: Dict[str, np.ndarray],
+    cfg_exp: ExperimentConfig,
+    *,
+    title: str,
+    learning_rate: float,
+    epochs: int,
+    optimizer_name: str,
+    batch_size: int,
+    weight_decay: float,
+    early_stopping_patience: int,
+    val_every_n_epochs: int,
+    grad_clip: float,
+    loss_name: str,
+    freeze_bn: bool,
+    only_head: bool,
+) -> StageResult:
+    """Generic phase-runner that can target a parameter subset (head only) or
+    the whole model, with optional BN freezing.  Used by `run_wang_transfer`.
+    """
+    # Stage-specific seed (so phase A/B remain reproducible independent of
+    # whether earlier phases ran from cache or scratch).
+    stage_seed = int(cfg_exp.data.random_state) + (4001 if "phase_a" in title else 4002)
+    torch.manual_seed(stage_seed)
+    if device.type == "cuda":
+        torch.cuda.manual_seed_all(stage_seed)
+
+    train_loader, val_loader = make_dataloaders(
+        data["X"], data["y"], data["tg"], data["tgt"], data["mask"],
+        batch_size=batch_size,
+        val_size=cfg_exp.data.val_size,
+        random_state=cfg_exp.data.random_state,
+        device=device,
+    )
+
+    # Build a synthetic StageConfig so we can reuse build_optimizer.
+    tmp_stage = StageConfig(
+        learning_rate=learning_rate,
+        weight_decay=weight_decay,
+        batch_size=batch_size,
+        epochs=epochs,
+        early_stopping_patience=early_stopping_patience,
+        val_every_n_epochs=val_every_n_epochs,
+        optimizer=optimizer_name,
+        loss=loss_name,
+        grad_clip=grad_clip,
+        freeze_bn=freeze_bn,
+    )
+
+    if only_head:
+        if not hasattr(model, "head"):
+            raise AttributeError(
+                f"wang_transfer requires the model to expose `self.head`; "
+                f"got model class {type(model).__name__}"
+            )
+        for p in model.parameters():
+            p.requires_grad = False
+        for p in model.head.parameters():
+            p.requires_grad = True
+        params = [p for p in model.parameters() if p.requires_grad]
+    else:
+        for p in model.parameters():
+            p.requires_grad = True
+        params = list(model.parameters())
+
+    criterion = build_loss(loss_name)
+    trainer = Trainer(
+        model, device,
+        criterion=criterion,
+        grad_clip=grad_clip,
+        freeze_bn=freeze_bn,
+    )
+    optimizer = build_optimizer(model, tmp_stage, params=params)
+    scheduler = build_scheduler(optimizer, tmp_stage)
+
+    best, history = trainer.fit(
+        train_loader, val_loader, optimizer,
+        epochs=epochs,
+        patience=early_stopping_patience,
+        scheduler=scheduler,
+        val_every_n=val_every_n_epochs,
+        title=title,
+    )
+    return StageResult(
+        stage=title,
+        best_loss=best,
+        state_dict={k: v.detach().cpu() for k, v in model.state_dict().items()},
+        history=history,
+    )
+
+
+def run_wang_transfer(model, device, cfg: ExperimentConfig, bundle: DatasetBundle) -> StageResult:
+    """Wang et al. 2023 three-phase transfer (Section 6.A).
+
+    Phase A: freeze backbone, re-init head, train head only.
+    Phase B: unfreeze, fine-tune full model with BN frozen.
+
+    Returns a single StageResult whose history concatenates both phases (with a
+    sentinel row marking the boundary), so existing per-experiment logging
+    (history.csv, metrics.json.stage_histories) continues to work.
+    """
+    wt = cfg.wang_transfer
+    if not wt.enabled:
+        raise ValueError("wang_transfer stage invoked but wang_transfer.enabled is False")
+
+    # Re-initialise the head before Phase A (Wang's spec).
+    if hasattr(model, "reset_head"):
+        model.reset_head()
+    elif hasattr(model, "head") and isinstance(model.head, nn.Linear):
+        nn.init.kaiming_normal_(model.head.weight)
+        if model.head.bias is not None:
+            nn.init.constant_(model.head.bias, 0.0)
+    else:
+        raise AttributeError(
+            "wang_transfer expects either model.reset_head() or model.head: nn.Linear"
+        )
+
+    res_a = _run_phase(
+        model, device, bundle.kaggle, cfg,
+        title="wang_transfer_phase_a",
+        learning_rate=wt.phase_a_lr,
+        epochs=wt.phase_a_epochs,
+        optimizer_name=wt.phase_a_optimizer,
+        batch_size=wt.phase_a_batch_size,
+        weight_decay=wt.phase_a_weight_decay,
+        early_stopping_patience=wt.phase_a_early_stopping_patience,
+        val_every_n_epochs=wt.phase_a_val_every_n_epochs,
+        grad_clip=wt.grad_clip,
+        loss_name=wt.loss,
+        freeze_bn=False,
+        only_head=True,
+    )
+    res_b = _run_phase(
+        model, device, bundle.kaggle, cfg,
+        title="wang_transfer_phase_b",
+        learning_rate=wt.phase_b_lr,
+        epochs=wt.phase_b_epochs,
+        optimizer_name=wt.phase_b_optimizer,
+        batch_size=wt.phase_b_batch_size,
+        weight_decay=wt.phase_b_weight_decay,
+        early_stopping_patience=wt.phase_b_early_stopping_patience,
+        val_every_n_epochs=wt.phase_b_val_every_n_epochs,
+        grad_clip=wt.grad_clip,
+        loss_name=wt.loss,
+        freeze_bn=wt.freeze_bn_in_phase_b,
+        only_head=False,
+    )
+
+    # Combine the per-phase histories with a phase-boundary marker so plots can
+    # tell them apart.  Use phase-prefixed epoch numbers so x-axis in history
+    # plots stays monotonically increasing.
+    combined: List[Dict[str, Any]] = []
+    for row in res_a.history:
+        r = dict(row)
+        r["phase"] = "A_head_only"
+        combined.append(r)
+    combined.append({"epoch": -1, "train": float("nan"), "val": float("nan"),
+                     "lr": float("nan"), "phase": "BREAK", "note": "phase A->B"})
+    for row in res_b.history:
+        r = dict(row)
+        r["phase"] = "B_full_finetune_bn_frozen"
+        combined.append(r)
+
+    return StageResult(
+        stage="wang_transfer",
+        best_loss=res_b.best_loss,
+        state_dict={k: v.detach().cpu() for k, v in model.state_dict().items()},
+        history=combined,
     )
 
 
@@ -715,8 +931,13 @@ def orchestrate(
         elif s == "joint":
             res = run_joint(model, device, cfg, bundle)
             stage_results.append(res)
+        elif s == "wang_transfer":
+            res = run_wang_transfer(model, device, cfg, bundle)
+            stage_results.append(res)
         else:
-            raise ValueError(f"Unknown stage: {stage!r} (expected: pretrain, finetune, joint)")
+            raise ValueError(
+                f"Unknown stage: {stage!r} (expected: pretrain, finetune, joint, wang_transfer)"
+            )
 
     return {
         "model": model,

@@ -118,15 +118,19 @@ stable gain on this dataset.  The paper therefore uses the simpler FourierKAN
 backbone as the main architecture and focuses the ablation study on transfer
 learning and the physics-grounded target parameterization.
 
-Parameter counts (within ±10 % of M-1):
+Parameter counts:
 
+| Model                              | role                        | #params |
+| ---------------------------------- | --------------------------- | ------- |
+| M-0 Wang DNN (Wang et al. 2023)    | external SOTA baseline      | ~132k   |
+| M-1 Ours (FourierKAN)              | proposed model              | ~291k   |
+| M-2 MLP (same-size)                | architecture ablation       | ~283k   |
+| M-3 CNN1D                          | architecture ablation       | ~281k   |
+| M-4 Transformer (channel-as-token) | architecture ablation       | ~310k   |
 
-| Model                              | #params |
-| ---------------------------------- | ------- |
-| M-1 Ours (FourierKAN)              | ~290k   |
-| M-2 MLP (same-size)                | ~283k   |
-| M-3 CNN1D                          | ~281k   |
-| M-4 Transformer (channel-as-token) | ~310k   |
+The published Wang DNN is roughly half the size of Ours.  The architecture-
+ablation backbones (M-2..M-4) are matched to Ours within ±10 % so that any
+gap between them and Ours cannot be attributed to parameter count.
 
 
 ### 1.8 Reproducibility
@@ -147,18 +151,27 @@ pre-training stage do not duplicate work.
 
 ## 2. Matrix of experiments
 
+The paper claims three contributions: (i) the FourierKAN architecture, (ii)
+COSMOS→Kaggle transfer learning, and (iii) physics-baseline target
+parameterization.  The experiment matrix is organised so the **headline main
+table** isolates the joint impact of all three (Wang DNN vs Ours), while
+three independent ablations isolate each contribution.
+
 ```mermaid
 graph TD
     Root[EDFA Digital Twin Experiments]
-    Root --> Main[Main Results]
-    Root --> Abl[Ablations]
+    Root --> Main[Main: external SOTA comparison]
+    Root --> Abl[Ablations: per-contribution]
+    Main --> M0[M-0 Wang DNN, Wang et al. 2023]
     Main --> M1[M-1 Ours FourierKAN]
-    Main --> M2[M-2 MLP Same-Size]
-    Main --> M3[M-3 CNN1D]
-    Main --> M4[M-4 Transformer]
-    Abl --> T[Transfer]
+    Abl --> ARCH[Architecture]
+    Abl --> T[Transfer learning]
     Abl --> P[Physics baseline]
     Abl --> D[Data scale]
+    ARCH --> A1m[M-1 Ours]
+    ARCH --> A2m[M-2 MLP same-size]
+    ARCH --> A3m[M-3 CNN1D]
+    ARCH --> A4m[M-4 Transformer]
     T --> T1[A-T1 No Finetune]
     T --> T2[A-T2 No Pretrain]
     T --> T3[A-T3 Joint Merge]
@@ -167,47 +180,78 @@ graph TD
     D --> Df[Finetune 25 50 100]
 ```
 
-
-
 ### 2.1 Main results (Table 1)
 
-Ours vs three matched-capacity baselines. All use the same `pretrain + finetune` protocol, the same preprocessor, and the same random seed. Source:
-`[results/_tables/table1_main.csv](../results/_tables/table1_main.csv)`.
+The headline external comparison: our full method versus the published EDFA
+DNN baseline by Wang et al. 2023, which is the dataset-origin paper.  Each
+row uses its own architecture *and* its own training/transfer protocol, i.e.
+this table reflects the joint effect of all three of our contributions.
+Source: `[results/_tables/table1_main_summary.csv](../results/_tables/table1_main_summary.csv)`.
 
-Columns reported in the paper:
+- `M-0 Wang DNN` — 4-hidden MLP with BN+ELU+Kaiming init, **Wang's own
+  three-phase transfer protocol** (Phase A: head-only retraining, lr=0.05,
+  150 epochs; Phase B: full fine-tune with BN frozen, lr=0.001, 20 epochs),
+  and direct absolute-gain regression (no physics prior).
+- `M-1 Ours` — FourierKAN backbone + physics-baseline residual target +
+  Adam pretrain → AdamW finetune.
 
-| method | #params | Overall MAE | Overall RMSE | Kaggle Score | Public Score | Private Score | aging MAE | shb MAE | unseen MAE | booster MAE | preamp MAE |
+### 2.2 Architecture ablation (Table 2)
 
-### 2.2 Transfer-learning ablation (Table 2)
+With Ours's transfer protocol and physics baseline held fixed, swap only
+the backbone in M-1.  All four backbones are matched to Ours's parameter
+count within ±10 %.  Source:
+`[results/_tables/table2_architecture_summary.csv](../results/_tables/table2_architecture_summary.csv)`.
 
-Probes the two core design choices in the transfer protocol.
-Source: `[results/_tables/table2_transfer.csv](../results/_tables/table2_transfer.csv)`.
+- `M-1 Ours` (FourierKAN, reference)
+- `M-2 MLP` (same-size LayerNorm + GELU MLP)
+- `M-3 CNN1D` (channel-as-sequence convolution)
+- `M-4 Transformer` (channel-as-token encoder)
 
-- `M-1 Ours`        — full pretrain → finetune (reference)
+### 2.3 Transfer-learning ablation (Table 3)
+
+Holds backbone (FourierKAN) and physics baseline fixed; varies only the
+training protocol.  Source:
+`[results/_tables/table3_transfer_summary.csv](../results/_tables/table3_transfer_summary.csv)`.
+
+- `M-1 Ours` — full pretrain → finetune (reference)
 - `A-T1 No-Finetune` — use pretrained weights directly on test (zero-shot)
 - `A-T2 No-Pretrain` — train from scratch on Kaggle only
-- `A-T3 Joint`      — single stage on `concat(COSMOS, Kaggle)`
+- `A-T3 Joint` — single stage on `concat(COSMOS, Kaggle)`
 
-### 2.3 Physics-baseline ablation (Table 3)
+### 2.4 Physics-baseline ablation (Table 4)
 
-Isolates the target parameterization claim: predicting the residual offset
-around the analytical `target_gain + target_gain_tilt` baseline versus directly
-regressing the full absolute gain spectrum. Source:
-`[results/_tables/table3_physics_summary.csv](../results/_tables/table3_physics_summary.csv)`.
+Holds backbone (FourierKAN) and protocol (pretrain+finetune) fixed; varies
+only the target parameterization.  Source:
+`[results/_tables/table4_physics_summary.csv](../results/_tables/table4_physics_summary.csv)`.
 
-- `M-1 Ours` — predict residual offset and add the physical baseline back at inference.
-- `A-P1 Predict Absolute` — same FourierKAN backbone and transfer protocol, but regress
-  `calculated_gain_spectra_*` directly.
+- `M-1 Ours` — predict residual offset around the analytical baseline.
+- `A-P1 Predict Absolute` — same backbone, regress `calculated_gain_spectra_*`
+  directly.
 
-### 2.4 Data-scale ablation (Figure 3)
+### 2.5 Data-scale ablation (Figure 3)
 
 Two 1-D scans sharing M-1 settings. Source:
-`[results/_tables/figure3_data_scale.csv](../results/_tables/figure3_data_scale.csv)`.
+`[results/_tables/figure3_data_scale_summary.csv](../results/_tables/figure3_data_scale_summary.csv)`.
 
 - **COSMOS scan** (Kaggle fixed at 100%): `cosmos_ratio ∈ {25%, 50%, 100%}`
 - **Kaggle scan** (COSMOS fixed at 100%): `kaggle_ratio ∈ {25%, 50%, 100%}`
 
 Plotted as two line charts (MAE and Kaggle Score vs. ratio).
+
+### 2.6 Note on Wang DNN feature dimension
+
+Wang et al. 2023 trains *one* DNN per EDFA device on a 193-dim feature
+vector (`g0`, `P_in`, `P_out`, 95 input-spectrum samples, 95 channel-loading
+indicators).  In our setup we instead train a **single global** Wang DNN and
+feed it the project-wide preprocessor's ~204-dim feature vector (which adds
+`target_gain_tilt` plus a small one-hot of `EDFA_type` and `edfa_index`).
+This adapts Wang's per-device design to the unseen-device split present in
+the Kaggle test set, while keeping every other architectural and training
+detail (hidden widths, BN+ELU, Kaiming init, masked-MSE loss, three-phase
+transfer protocol, gradient clipping at 3.0) identical to the published
+specification.  The only structural change is the width of the first linear
+layer.  Total Wang DNN parameter count under our input is ~132k, in line
+with the published ~125k–130k figures.
 
 ---
 
@@ -227,20 +271,37 @@ python scripts/cosmos_to_kaggle.py \
     --out-dir data/cosmos-as-kaggle \
     --category cosmos --gains 18dB --channel-types fix
 
-# 3. Run the default paper matrix (main + transfer + physics; data-scale optional)
+# 3. Run the default paper matrix (main + architecture + transfer + physics).
+#    `data_scale` runs are excluded by default; use --include-data-scale to add.
 python scripts/run_matrix.py
 
-# 4. Aggregate into paper-ready tables
+# 4. (Recommended) sweep multiple seeds to populate the cross-seed
+#    summary tables that the notebook reads.
+python scripts/run_seeds.py --seeds 42 43 44 45 --aggregate-after
+
+# 5. (Or manually) aggregate already-finished runs into paper-ready tables.
 python scripts/aggregate_results.py
 ```
 
 ### 3.2 Running subsets
 
 ```bash
+# Headline external comparison only
+python scripts/run_matrix.py --only m0_wang_dnn m1_ours
+
+# Architecture ablation only
 python scripts/run_matrix.py --only m1_ours m2_mlp m3_cnn1d m4_transformer
-python scripts/run_matrix.py --only a_t1_no_finetune a_t2_no_pretrain a_t3_joint
-python scripts/run_matrix.py --only a_p1_predict_absolute
+
+# Transfer-learning ablation only
+python scripts/run_matrix.py --only m1_ours a_t1_no_finetune a_t2_no_pretrain a_t3_joint
+
+# Physics-baseline ablation only
+python scripts/run_matrix.py --only m1_ours a_p1_predict_absolute
+
+# Include the optional data-scale 1-D scans
 python scripts/run_matrix.py --include-data-scale
+
+# Force re-run regardless of existing metrics.json
 python scripts/run_matrix.py --force
 ```
 
@@ -257,10 +318,17 @@ python scripts/run_experiment.py --config experiments/main/m1_ours.yaml \
 
 ### 3.4 Recommended compute
 
-- Default matrix = **8 experiments** (4 main + 3 transfer + 1 physics ablation);
-  data-scale adds 6 optional runs.
-- ~30 min on a single A100 (500 epochs); ~4–6 hours on MPS (Apple Silicon);
-~60–90 min on a modern 16-core CPU.
+- Default matrix = **9 experiments**:
+  2 main (M-0 Wang DNN, M-1 Ours)
+  + 3 architecture (M-2/M-3/M-4)
+  + 3 transfer (A-T1/A-T2/A-T3)
+  + 1 physics (A-P1).
+  Data-scale adds 6 optional runs (`--include-data-scale`).
+- The runner orders experiments so that a single FourierKAN pretrain is
+  produced first and reused by the rest of the FourierKAN cells through
+  `_pretrain_cache/`; only ~3 unique pretrain runs are actually performed.
+- ~45 min/seed on a single A100 (full 500/600 epoch budgets);
+  ~5–7 h/seed on MPS (Apple Silicon).
 
 ---
 

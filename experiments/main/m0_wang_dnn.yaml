@@ -1,0 +1,66 @@
+base: ../base.yaml
+name: m0_wang_dnn
+
+# M-0 — Wang et al. 2023 reference DNN baseline.
+#
+# This experiment reproduces the DNN-based EDFA gain spectrum model and the
+# three-phase transfer-learning protocol from the dataset-origin paper (the
+# very paper that released the COSMOS-EDFA dataset we use).  It serves as the
+# external SOTA baseline that M-1 Ours is compared against in the main table.
+#
+# Difference from the published model
+# -----------------------------------
+# The original paper trains one DNN per EDFA device on a 193-dim feature
+# vector.  Here we train a single global model and feed it the project-wide
+# preprocessor's ~204-dim feature vector (it adds `target_gain_tilt` and a
+# small one-hot of `EDFA_type` and `edfa_index`).  This adapts the per-device
+# design to the unseen-device split present in the Kaggle test set, while
+# leaving every other architectural and training detail (hidden widths,
+# BN+ELU, Kaiming init, masked-MSE loss, three-phase transfer) untouched.
+
+model:
+  name: wang_dnn
+  predict_absolute: true            # Wang's DNN regresses absolute gain
+  wang_hidden_dims: [256, 128, 128, 128]
+
+# Stage list:
+#   pretrain      : "source" model on COSMOS, mirroring Wang's source-EDFA stage
+#   wang_transfer : Wang's three-phase transfer onto the small Kaggle target set
+stages: [pretrain, wang_transfer]
+
+# Wang Section 5.A "Standard DNN Training Configuration":
+#   lr=0.001, 600 epochs, gradient clip=3.0
+pretrain:
+  enabled: true
+  learning_rate: 0.001
+  weight_decay: 0.0
+  batch_size: 256
+  epochs: 600
+  early_stopping_patience: 60
+  val_every_n_epochs: 2
+  optimizer: adam
+  loss: masked_mse
+  grad_clip: 3.0
+
+# Wang Section 6.A "Transfer Learning Procedure":
+#   Phase A: freeze backbone, reinit head, lr=0.05, 150 epochs
+#   Phase B: unfreeze, BN frozen, lr=0.001, 20 epochs
+wang_transfer:
+  enabled: true
+  phase_a_lr: 0.05
+  phase_a_epochs: 150
+  phase_a_optimizer: sgd
+  phase_a_batch_size: 64
+  phase_a_weight_decay: 0.0
+  phase_a_early_stopping_patience: 30
+  phase_a_val_every_n_epochs: 1
+  phase_b_lr: 0.001
+  phase_b_epochs: 20
+  phase_b_optimizer: sgd
+  phase_b_batch_size: 64
+  phase_b_weight_decay: 0.0
+  phase_b_early_stopping_patience: 20
+  phase_b_val_every_n_epochs: 1
+  freeze_bn_in_phase_b: true
+  grad_clip: 3.0
+  loss: masked_mse

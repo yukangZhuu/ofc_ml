@@ -57,6 +57,9 @@ class ModelConfig:
       - "mlp":            same-size MLP baseline
       - "cnn1d":          1D Conv baseline (channel-as-sequence)
       - "transformer":    Transformer encoder baseline (channel-as-token)
+      - "wang_dnn":       Wang et al. 2023 reference DNN (4 hidden layers,
+                          BN+ELU, Kaiming init).  Used as the headline
+                          external baseline (M-0).
 
     Fields not relevant to a given architecture are silently ignored.
     """
@@ -80,6 +83,9 @@ class ModelConfig:
     tr_nhead: int = 4
     tr_num_layers: int = 4
     tr_dim_feedforward: int = 192
+    # Wang DNN specific (Wang et al. 2023, Section 5.A).  The first layer
+    # width is auto-derived from the actual input dimension we feed in.
+    wang_hidden_dims: List[int] = field(default_factory=lambda: [256, 128, 128, 128])
 
 
 @dataclass
@@ -92,10 +98,47 @@ class StageConfig:
     epochs: int = 500
     early_stopping_patience: int = 40
     val_every_n_epochs: int = 2
-    optimizer: str = "adam"  # "adam" or "adamw"
+    optimizer: str = "adam"  # "adam", "adamw", or "sgd"
     loss: str = "masked_mse"  # "masked_mse" or "kaggle_score"
     scheduler: str = "reduce_on_plateau"  # only option now
     grad_clip: float = 1.0
+    momentum: float = 0.9         # used only when optimizer == "sgd"
+    freeze_bn: bool = False       # if True, BatchNorm layers stay in eval mode
+
+
+@dataclass
+class WangTransferConfig:
+    """Three-phase transfer-learning protocol from Wang et al. 2023, Section 6.A.
+
+    Phase A: freeze every layer except the output head, re-initialise the head
+    with Kaiming, train head-only at a relatively large learning rate.
+
+    Phase B: unfreeze every layer, fine-tune the whole model at a small
+    learning rate while keeping BatchNorm in eval mode (so the running
+    statistics from the source model are not overwritten by the small target
+    dataset).
+    """
+    enabled: bool = True
+    # Phase A: head-only retraining.
+    phase_a_lr: float = 0.05
+    phase_a_epochs: int = 150
+    phase_a_optimizer: str = "sgd"
+    phase_a_batch_size: int = 64
+    phase_a_weight_decay: float = 0.0
+    phase_a_early_stopping_patience: int = 30
+    phase_a_val_every_n_epochs: int = 1
+    # Phase B: full-model fine-tuning with BN frozen.
+    phase_b_lr: float = 0.001
+    phase_b_epochs: int = 20
+    phase_b_optimizer: str = "sgd"
+    phase_b_batch_size: int = 64
+    phase_b_weight_decay: float = 0.0
+    phase_b_early_stopping_patience: int = 20
+    phase_b_val_every_n_epochs: int = 1
+    freeze_bn_in_phase_b: bool = True
+    # Shared
+    grad_clip: float = 3.0
+    loss: str = "masked_mse"
 
 
 @dataclass
@@ -161,6 +204,10 @@ class ExperimentConfig:
             optimizer="adam",
         )
     )
+    # Wang-style three-phase transfer (used by M-0 Wang DNN baseline).  Other
+    # experiments simply leave it disabled by not including "wang_transfer" in
+    # the `stages` list.
+    wang_transfer: WangTransferConfig = field(default_factory=WangTransferConfig)
     eval: EvalConfig = field(default_factory=EvalConfig)
 
     # ------------------------------------------------------------------ #
@@ -192,7 +239,8 @@ class ExperimentConfig:
         def _convert(v: Any) -> Any:
             if isinstance(v, Path):
                 return str(v)
-            if isinstance(v, (StageConfig, DataConfig, FeatureConfig, ModelConfig, EvalConfig, ExperimentConfig)):
+            if isinstance(v, (StageConfig, DataConfig, FeatureConfig, ModelConfig,
+                              EvalConfig, WangTransferConfig, ExperimentConfig)):
                 return {k: _convert(getattr(v, k)) for k in v.__dataclass_fields__}
             if isinstance(v, list):
                 return [_convert(x) for x in v]
