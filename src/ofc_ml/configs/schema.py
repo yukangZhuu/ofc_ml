@@ -96,6 +96,13 @@ class StageConfig:
     loss: str = "masked_mse"  # "masked_mse" or "kaggle_score"
     scheduler: str = "reduce_on_plateau"  # only option now
     grad_clip: float = 1.0
+    # When True, every BatchNorm module in the model is held in eval mode and
+    # its affine parameters are frozen for the duration of this stage.  This
+    # prevents BN running statistics from drifting on small fine-tuning sets,
+    # which we observed to produce catastrophic test-time outliers for the
+    # Wang-DNN-TL baseline (see docs/wang_dnn_vs_ours_spec.md §3.6).  Defaults
+    # to False so existing experiments are unaffected.
+    freeze_batchnorm: bool = False
 
 
 @dataclass

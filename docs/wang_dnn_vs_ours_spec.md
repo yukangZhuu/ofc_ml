@@ -34,6 +34,7 @@ The high-level paper-facing rationale is in
 | Pretrain epochs | `500` with early stop (patience `40`) | Same. Wang's standalone DNN budget is `600` epochs; with early stopping on COSMOS the cap is non-binding. |
 | Finetune epochs | `500` with early stop (patience `60`) | Same |
 | Gradient clipping | `‖g‖ ≤ 1.0` | `‖g‖ ≤ 3.0` (Wang's value) |
+| BN handling during finetune | N/A (no BN in FourierKAN) | BN frozen (eval mode + non-trainable affine), see §3.6 |
 | Scheduler | ReduceLROnPlateau (factor `0.5`, patience `10`) | Same |
 | Validation split | `5%` of training set | Same |
 | Inference postprocessing | `pred + baseline`, then mask | `pred`, then mask (no baseline addition because target is absolute) |
@@ -128,6 +129,69 @@ channels output zero.
 
 ---
 
+### 3.6 BatchNorm freezing during finetune
+
+Without this rule, the Wang-DNN-TL baseline produces catastrophic test-time
+outliers when run end-to-end on the OFC/Kaggle benchmark. We observed:
+
+```text
+seed 42, full pretrain + finetune:
+  pretrain val loss: 0.003 dB^2  (RMSE ≈ 0.05 dB)
+  finetune val loss: 0.008 dB^2  (RMSE ≈ 0.09 dB)
+  test overall MAE: 3.92 dB, Tmax: 75.8 dB
+  unseen-category MAE: 4.58 dB
+```
+
+By contrast `a_p1_predict_absolute` (FourierKAN with `predict_absolute=true`,
+no BatchNorm) under the same protocol gives MAE 0.82 dB and Tmax 0.0 dB, and
+m1_ours (FourierKAN with the residual target) gives MAE 0.10 dB. The gap
+between Wang-DNN-TL and `a_p1_predict_absolute` is therefore *not* explained
+by the absolute-vs-residual target choice — it is an additional, BN-specific
+failure mode.
+
+Diagnosis:
+
+- COSMOS has 41 440 rows; the BN running statistics learned during pretrain
+  are well-conditioned for the global EDFA distribution.
+- OFC/Kaggle has 473 rows. With `batch_size=64` and roughly 7 effective
+  batches per fine-tune epoch, the BN running statistics get rapidly
+  overwritten by a small, biased view of the data.
+- At test time the OOD samples (`Category=unseen`, including
+  `target_gain=20.0` which never appears in training) are passed through
+  these contaminated BN layers and the activations diverge.
+- The `predict_absolute=True` target then has no analytical anchor to clamp
+  the divergence, so individual channels can produce errors up to ~75 dB.
+
+Fix:
+
+For the entire finetune stage, every `BatchNorm1d` (or any BN-family) module
+in the Wang-DNN model is held in `eval()` mode and its `weight` / `bias`
+have `requires_grad=False`. This preserves the COSMOS-pretrain BN statistics
+through finetune and keeps the affine parameters from overfitting to the
+small Kaggle batches.
+
+Implementation:
+
+- A new `StageConfig.freeze_batchnorm` flag (default `False`) is added in
+  `src/ofc_ml/configs/schema.py`.
+- `Trainer` in `src/ofc_ml/model.py` re-applies the freeze at the start of
+  every epoch so that `model.train()` does not undo it.
+- `experiments/main/wang_dnn_tl.yaml` sets `finetune.freeze_batchnorm: true`.
+  The pretrain stage on COSMOS leaves BN active and trainable, which is the
+  paper-faithful Wang standalone-DNN configuration.
+
+This rule matches Wang TL paper Stage 3 (`docs/wang2023_tl_edfa_gain_model.md`
+§4.3): *"batch normalization parameters are kept unchanged"*. Even though we
+do not adopt Wang's full freeze-output-layer-then-unfreeze TL flow, the
+BN-freeze rule is the right thing to do whenever a BN-using model is
+fine-tuned on a small target set, irrespective of which TL protocol is used
+around it.
+
+The `freeze_batchnorm` field is intentionally excluded from the
+`_arch_signature()` cache key whenever it equals its default `False`, so
+existing pretrain caches produced before this field was introduced remain
+valid for all other experiments.
+
 ## 4. Wang-DNN-TL training configuration
 
 File: `experiments/main/wang_dnn_tl.yaml` (see also `experiments/base.yaml`
@@ -152,6 +216,7 @@ pretrain:
 
 finetune:
   grad_clip: 3.0
+  freeze_batchnorm: true        # see §3.6
 ```
 
 Everything not overridden is inherited from `experiments/base.yaml`, which

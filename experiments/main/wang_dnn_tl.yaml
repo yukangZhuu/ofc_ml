@@ -32,3 +32,10 @@ pretrain:
 
 finetune:
   grad_clip: 3.0
+  # Hold every BatchNorm in eval mode and freeze its affine parameters during
+  # finetune.  Without this the BN running statistics learnt on the large
+  # COSMOS pretrain set get overwritten by a few small Kaggle batches and the
+  # model produces extreme test-time outliers (Tmax ~75 dB, see
+  # docs/wang_dnn_vs_ours_spec.md §3.6).  Wang TL paper Stage 3 prescribes
+  # the same rule.
+  freeze_batchnorm: true

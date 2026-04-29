@@ -219,6 +219,27 @@ def make_dataloaders(
 # ---------------------------------------------------------------------- #
 # Trainer                                                                #
 # ---------------------------------------------------------------------- #
+def _freeze_batchnorm(model: nn.Module) -> int:
+    """Put every BatchNorm-family module in eval mode and freeze its affine
+    parameters.  Idempotent.  Returns the number of BN modules touched.
+
+    BN is sensitive to small fine-tuning sets: the running mean/variance can
+    drift away from the source-domain statistics and the affine parameters can
+    overfit, both of which damage out-of-distribution test accuracy.  Freezing
+    matches the Wang TL paper's Stage 3 prescription
+    (`docs/wang2023_tl_edfa_gain_model.md` §4.3) and is enabled per stage via
+    `StageConfig.freeze_batchnorm`.
+    """
+    n = 0
+    for m in model.modules():
+        if isinstance(m, nn.modules.batchnorm._BatchNorm):
+            m.eval()
+            for p in m.parameters(recurse=False):
+                p.requires_grad = False
+            n += 1
+    return n
+
+
 class Trainer:
     """A small training loop with validation, scheduler, and early stopping."""
 
@@ -229,15 +250,26 @@ class Trainer:
         criterion: Optional[nn.Module] = None,
         use_amp: bool = False,
         grad_clip: float = 1.0,
+        freeze_bn: bool = False,
     ):
         self.model = model.to(device)
         self.device = device
         self.criterion = criterion or MaskedMSELoss()
         self.scaler = GradScaler() if (use_amp and device.type == "cuda") else None
         self.grad_clip = float(grad_clip)
+        self.freeze_bn = bool(freeze_bn)
+        if self.freeze_bn:
+            n = _freeze_batchnorm(self.model)
+            print(f"[trainer] freeze_batchnorm=True -> {n} BN module(s) put in eval mode")
 
     def _train_epoch(self, loader: DataLoader, optimizer) -> float:
         self.model.train()
+        # `model.train()` flips every submodule (including BN) back to train
+        # mode, which would re-enable running-statistics updates and gradient
+        # flow on BN affine params.  Re-apply the freeze every epoch so the
+        # contract is preserved across the full fit() loop.
+        if self.freeze_bn:
+            _freeze_batchnorm(self.model)
         total, denom = 0.0, 0.0
         for batch in loader:
             X, y, _, _, mask = [b.to(self.device, non_blocking=True) for b in batch]
@@ -454,7 +486,13 @@ def _run_stage(
         device=device,
     )
     criterion = build_loss(stage_cfg.loss)
-    trainer = Trainer(model, device, criterion=criterion, grad_clip=stage_cfg.grad_clip)
+    trainer = Trainer(
+        model,
+        device,
+        criterion=criterion,
+        grad_clip=stage_cfg.grad_clip,
+        freeze_bn=getattr(stage_cfg, "freeze_batchnorm", False),
+    )
     optimizer = build_optimizer(model, stage_cfg)
     scheduler = build_scheduler(optimizer, stage_cfg)
     best, history = trainer.fit(
@@ -547,10 +585,18 @@ def _arch_signature(cfg: ExperimentConfig, input_dim: int) -> str:
     cosmos_ratio, seed, input_dim, preprocessor setup) share the same
     pretrain outcome, so we can reuse a cached checkpoint.
     """
+    pretrain_dict = dict(cfg.pretrain.__dict__)
+    # `freeze_batchnorm` was added after the original cache schema; strip it
+    # from the hash whenever it equals its default (False) so that pretrain
+    # caches produced before the field existed remain valid.  When it is
+    # actually True the run produces a different checkpoint and we *do* want
+    # the hash to diverge.
+    if pretrain_dict.get("freeze_batchnorm", False) is False:
+        pretrain_dict.pop("freeze_batchnorm", None)
     key = {
         "cache_version": CACHE_VERSION,
         "model": cfg.model.__dict__,
-        "pretrain": cfg.pretrain.__dict__,
+        "pretrain": pretrain_dict,
         "cosmos_ratio": cfg.data.cosmos_ratio,
         "seed": cfg.seed,
         "use_mask": cfg.feature.use_mask,

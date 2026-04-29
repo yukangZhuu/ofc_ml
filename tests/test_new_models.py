@@ -145,6 +145,9 @@ class TestExperimentYamls(unittest.TestCase):
         self.assertEqual(list(cfg.stages), ["pretrain", "finetune"])
         self.assertEqual(cfg.pretrain.grad_clip, 3.0)
         self.assertEqual(cfg.finetune.grad_clip, 3.0)
+        # Pretrain on COSMOS keeps BN active; finetune freezes it.
+        self.assertFalse(cfg.pretrain.freeze_batchnorm)
+        self.assertTrue(cfg.finetune.freeze_batchnorm)
 
     def test_physics_baseline_loads_with_empty_stages(self):
         cfg = load_experiment_config("experiments/main/physics_baseline.yaml")
@@ -177,6 +180,105 @@ class TestRunMatrixOrdering(unittest.TestCase):
         self.assertEqual(names[0], "physics_baseline")
         self.assertLess(names.index("m1_ours"), names.index("m2_mlp"))
         self.assertLess(names.index("m1_ours"), names.index("wang_dnn_tl"))
+
+
+class TestBatchNormFreezing(unittest.TestCase):
+    """Behavioural tests for the BN-freezing path used by Wang-DNN-TL finetune."""
+
+    def _make_model(self):
+        return WangDNNPredictor(input_dim=12, output_dim=4, hidden_dims=[8, 6])
+
+    def test_freeze_batchnorm_helper_puts_bn_in_eval(self):
+        from ofc_ml.model import _freeze_batchnorm
+
+        model = self._make_model()
+        model.train()
+        n = _freeze_batchnorm(model)
+        self.assertEqual(n, 2)  # one BN per hidden layer
+        for module in model.modules():
+            if isinstance(module, torch.nn.BatchNorm1d):
+                self.assertFalse(module.training)
+                for p in module.parameters(recurse=False):
+                    self.assertFalse(p.requires_grad)
+        # Non-BN params stay trainable.
+        head_params = list(model.head.parameters())
+        self.assertTrue(all(p.requires_grad for p in head_params))
+
+    def test_running_stats_unchanged_when_frozen(self):
+        from ofc_ml.model import _freeze_batchnorm
+
+        model = self._make_model()
+        # Drive the BN running stats with one warm-up forward in train mode.
+        model.train()
+        warm = torch.randn(8, 12)
+        model(warm)
+        snapshots = []
+        for module in model.modules():
+            if isinstance(module, torch.nn.BatchNorm1d):
+                snapshots.append((module.running_mean.clone(), module.running_var.clone()))
+
+        _freeze_batchnorm(model)
+        # Subsequent forwards (in either train or eval mode) must NOT mutate
+        # running_mean / running_var while the freeze is active.
+        for _ in range(3):
+            x = torch.randn(8, 12) * 5.0 + 10.0  # very different distribution
+            model.train()
+            _freeze_batchnorm(model)             # idempotent re-freeze
+            model(x)
+
+        idx = 0
+        for module in model.modules():
+            if isinstance(module, torch.nn.BatchNorm1d):
+                rm, rv = snapshots[idx]
+                self.assertTrue(torch.equal(module.running_mean, rm))
+                self.assertTrue(torch.equal(module.running_var, rv))
+                idx += 1
+
+    def test_trainer_keeps_bn_frozen_after_train_call(self):
+        from ofc_ml.model import Trainer
+
+        model = self._make_model()
+        device = torch.device("cpu")
+        trainer = Trainer(model, device, freeze_bn=True)
+        for module in model.modules():
+            if isinstance(module, torch.nn.BatchNorm1d):
+                self.assertFalse(module.training)
+
+        # Mimic what _train_epoch does at the start of every epoch.
+        trainer.model.train()
+        from ofc_ml.model import _freeze_batchnorm
+        if trainer.freeze_bn:
+            _freeze_batchnorm(trainer.model)
+
+        for module in model.modules():
+            if isinstance(module, torch.nn.BatchNorm1d):
+                self.assertFalse(module.training, "BN escaped freeze after model.train()")
+
+    def test_trainer_default_does_not_freeze(self):
+        from ofc_ml.model import Trainer
+
+        model = self._make_model()
+        Trainer(model, torch.device("cpu"))  # freeze_bn defaults to False
+        # BN modules retain default training=True until model.train()/eval() is called.
+        bn_modules = [m for m in model.modules() if isinstance(m, torch.nn.BatchNorm1d)]
+        self.assertTrue(all(p.requires_grad for m in bn_modules for p in m.parameters()))
+
+    def test_arch_signature_default_freeze_does_not_invalidate_cache(self):
+        from ofc_ml.model import _arch_signature
+
+        cfg_old = load_experiment_config("experiments/main/m1_ours.yaml")
+        sig_default = _arch_signature(cfg_old, input_dim=204)
+
+        # Mutate the freeze field to its default (False) and confirm the hash
+        # is unchanged.  Existing caches stay valid.
+        cfg_old.pretrain.freeze_batchnorm = False
+        sig_after = _arch_signature(cfg_old, input_dim=204)
+        self.assertEqual(sig_default, sig_after)
+
+        # When the field is True the hash diverges so a new cache slot is used.
+        cfg_old.pretrain.freeze_batchnorm = True
+        sig_frozen = _arch_signature(cfg_old, input_dim=204)
+        self.assertNotEqual(sig_default, sig_frozen)
 
 
 class TestAggregateGroups(unittest.TestCase):

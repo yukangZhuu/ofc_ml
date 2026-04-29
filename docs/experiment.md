@@ -169,6 +169,16 @@ Recommended paper wording:
 > from Wang et al., because that protocol targets component-level model transfer,
 > whereas our benchmark evaluates a single global EDFA digital twin.
 
+One implementation detail of Wang's TL protocol that we do retain is the
+BatchNorm-freezing rule from Stage 3 of the original procedure. During the
+fine-tuning stage we keep every BatchNorm module of the Wang-style DNN in
+evaluation mode and freeze its affine parameters, so that the BN statistics
+learned on the large COSMOS pretraining set are preserved across the small
+OFC/Kaggle fine-tuning set. Without this rule the baseline produces extreme
+test-time outliers on the out-of-distribution `unseen` category. The detailed
+diagnosis is in [`docs/wang_dnn_vs_ours_spec.md`](wang_dnn_vs_ours_spec.md)
+§3.6.
+
 ### 3.5 Target Parameterization
 
 The Wang-DNN-TL baseline should predict absolute gain, matching the Wang paper's
