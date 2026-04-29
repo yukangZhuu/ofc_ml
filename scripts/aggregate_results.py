@@ -10,7 +10,16 @@ For every paper table this script emits **two** CSVs to `results/_tables/`:
     table{1..4}_<group>_per_seed.csv     long format, one row per (seed, exp)
     table{1..4}_<group>_summary.csv      mean / std / n_seeds for each exp
 
-and similarly for figure3 (data-scale).
+The four groups follow the paper-facing matrix documented in
+`docs/experiment.md`:
+
+    table1_main      physics_baseline / wang_dnn_tl / m1_ours
+    table2_transfer  m1_ours / a_t1_no_finetune / a_t2_no_pretrain / a_t3_joint
+    table3_arch      m1_ours / m2_mlp / m3_cnn1d / m4_transformer
+    table4_physics   m1_ours / a_p1_predict_absolute
+
+Figure 3 (data-scale) is still emitted when those experiments are present,
+but is no longer part of the paper matrix.
 
 All MAE/RMSE/Std/T95/Tmax/KaggleScore columns carry explicit `_dB` suffixes;
 MSE is in `_dB2`.  Summary CSVs additionally provide a pretty
@@ -33,7 +42,10 @@ RESULTS_ROOT = PROJECT_ROOT / "results"
 OUT_DIR = RESULTS_ROOT / "_tables"
 
 # Canonical experiment groupings (order matters for table column layout).
-MAIN_EXPS      = ["m1_ours", "m2_mlp", "m3_cnn1d", "m4_transformer"]
+# Aligned with the paper-facing matrix in `docs/experiment.md` and the
+# notebook layout in `notebooks/results_viz.ipynb`.
+MAIN_EXPS      = ["physics_baseline", "wang_dnn_tl", "m1_ours"]
+ARCH_EXPS      = ["m1_ours", "m2_mlp", "m3_cnn1d", "m4_transformer"]
 TRANSFER_EXPS  = ["m1_ours", "a_t1_no_finetune", "a_t2_no_pretrain", "a_t3_joint"]
 PHYSICS_EXPS   = ["m1_ours", "a_p1_predict_absolute"]
 DATA_SCALE_EXPS = [
@@ -249,7 +261,8 @@ def main():
     groups: List[Tuple[str, List[str]]] = [
         ("table1_main",     MAIN_EXPS),
         ("table2_transfer", TRANSFER_EXPS),
-        ("table3_physics",  PHYSICS_EXPS),
+        ("table3_arch",     ARCH_EXPS),
+        ("table4_physics",  PHYSICS_EXPS),
     ]
     for name, exps in groups:
         long_df = per_seed_long_table(exps, seeds, results_root=RESULTS_ROOT)

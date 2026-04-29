@@ -21,6 +21,8 @@ from .hybrid_fno_kan import HybridFNOKANPredictor
 from .mlp import MLPPredictor
 from .cnn1d import CNN1DPredictor
 from .transformer import TransformerPredictor
+from .wang_dnn import WangDNNPredictor
+from .physics_baseline import PhysicsBaselinePredictor
 
 
 def build_model(cfg: ModelConfig, input_dim: int, output_dim: int = 95) -> nn.Module:
@@ -63,6 +65,17 @@ def build_model(cfg: ModelConfig, input_dim: int, output_dim: int = 95) -> nn.Mo
             dim_feedforward=cfg.tr_dim_feedforward,
             dropout=cfg.dropout,
         )
+    if name == "wang_dnn":
+        return WangDNNPredictor(
+            input_dim=input_dim,
+            output_dim=output_dim,
+            hidden_dims=cfg.hidden_dims,
+            dropout=cfg.dropout,
+        )
+    if name == "physics_baseline":
+        # Non-trainable analytical reference. `input_dim` is unused by the
+        # module itself but kept in the signature for symmetry.
+        return PhysicsBaselinePredictor(output_dim=output_dim)
     raise ValueError(f"Unknown model name: {cfg.name!r}")
 
 
@@ -75,6 +88,8 @@ __all__ = [
     "MLPPredictor",
     "CNN1DPredictor",
     "TransformerPredictor",
+    "WangDNNPredictor",
+    "PhysicsBaselinePredictor",
     "build_model",
     "count_parameters",
 ]

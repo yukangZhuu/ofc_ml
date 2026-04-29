@@ -214,16 +214,22 @@ Defined under `experiments/` as overlayed YAMLs (`base:` chain). Execute any of 
 
 | YAML | Stem | Purpose |
 |------|------|---------|
+| `experiments/main/physics_baseline.yaml`                    | `physics_baseline`     | Non-trainable analytical `target_gain + tilt` reference |
+| `experiments/main/wang_dnn_tl.yaml`                         | `wang_dnn_tl`          | Wang-style DNN baseline (global adapted) under our TL protocol |
 | `experiments/main/m1_ours.yaml`                            | `m1_ours`              | Ours: FourierKAN + physics residual target + pretrain→finetune |
-| `experiments/main/m2_mlp.yaml`                              | `m2_mlp`               | Same-capacity MLP baseline |
-| `experiments/main/m3_cnn1d.yaml`                            | `m3_cnn1d`             | 1D CNN baseline |
-| `experiments/main/m4_transformer.yaml`                      | `m4_transformer`       | Transformer baseline (channel-as-token) |
+| `experiments/main/m2_mlp.yaml`                              | `m2_mlp`               | Same-capacity MLP baseline (architecture ablation) |
+| `experiments/main/m3_cnn1d.yaml`                            | `m3_cnn1d`             | 1D CNN baseline (architecture ablation) |
+| `experiments/main/m4_transformer.yaml`                      | `m4_transformer`       | Transformer baseline, channel-as-token (architecture ablation) |
 | `experiments/ablation/transfer/a_t1_no_finetune.yaml`       | `a_t1_no_finetune`     | Use pretrained weights zero-shot |
 | `experiments/ablation/transfer/a_t2_no_pretrain.yaml`       | `a_t2_no_pretrain`     | Kaggle from scratch |
 | `experiments/ablation/transfer/a_t3_joint.yaml`             | `a_t3_joint`           | Single stage on COSMOS ∪ Kaggle |
 | `experiments/ablation/physics/a_p1_predict_absolute.yaml`   | `a_p1_predict_absolute`| Predict absolute gain, no baseline-residual parameterisation |
-| `experiments/ablation/data_scale/pretrain_{25,50,100}.yaml` | `ds_pretrain_<R>`      | Data-scale scan over COSMOS ratio |
-| `experiments/ablation/data_scale/finetune_{25,50,100}.yaml` | `ds_finetune_<R>`      | Data-scale scan over Kaggle ratio |
+| `experiments/ablation/data_scale/pretrain_{25,50,100}.yaml` | `ds_pretrain_<R>`      | Data-scale scan over COSMOS ratio (not in paper matrix) |
+| `experiments/ablation/data_scale/finetune_{25,50,100}.yaml` | `ds_finetune_<R>`      | Data-scale scan over Kaggle ratio (not in paper matrix) |
+
+The paper-facing matrix and Wang-DNN-TL design rationale are documented in
+[`docs/experiment.md`](docs/experiment.md) and
+[`docs/wang_dnn_vs_ours_spec.md`](docs/wang_dnn_vs_ours_spec.md).
 
 The matrix runner schedules items in an order chosen to maximise pretrain-cache reuse and to defer heavy models (Transformer) to the end; see top of `scripts/run_matrix.py` to adjust.
 

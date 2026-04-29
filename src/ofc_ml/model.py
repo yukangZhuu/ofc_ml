@@ -197,6 +197,12 @@ def make_dataloaders(
     pin = device.type == "cuda"
     generator = torch.Generator()
     generator.manual_seed(int(random_state))
+    # Drop the trailing partial batch when there is enough data to do so, so
+    # that BatchNorm1d-based models (e.g. WangDNNPredictor) never see a
+    # singleton tail batch.  When the entire training set is smaller than a
+    # single batch (e.g. heavily-subsampled smoke tests) we leave drop_last off
+    # so we still produce one batch per epoch.
+    drop_last = len(tr) > batch_size
     train_loader = DataLoader(
         tr,
         batch_size=batch_size,
@@ -204,6 +210,7 @@ def make_dataloaders(
         num_workers=nw,
         pin_memory=pin,
         generator=generator,
+        drop_last=drop_last,
     )
     val_loader   = DataLoader(val, batch_size=batch_size, shuffle=False, num_workers=nw, pin_memory=pin)
     return train_loader, val_loader

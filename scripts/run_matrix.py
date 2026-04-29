@@ -65,26 +65,30 @@ def seed_results_root(seed: int) -> Path:
 # Experiment ordering                                                #
 # ------------------------------------------------------------------ #
 # Chosen to schedule light / cache-reusing cells first and the heavy
-# Transformer run last.  Architecture ablations are intentionally omitted:
-# the paper's ablations now focus on transfer learning and the physics
-# baseline target parameterisation.  `data_scale` experiments are also
-# excluded by default; pass `--include-data-scale` to include them.
+# Transformer run last.  The paper-facing matrix is documented in
+# `docs/experiment.md` (main: physics + Wang-DNN-TL + ours; ablations:
+# architecture, physics, transfer).  `data_scale` experiments are excluded
+# by default; pass `--include-data-scale` to include them.
 ORDERED_EXPERIMENTS: List[str] = [
-    # 1. Cheapest: reuses m1 pretrain cache (or runs it itself).
+    # 1. Cheapest: non-trainable analytical reference (no training stages).
+    "experiments/main/physics_baseline.yaml",
+    # 2. Cheap: reuses m1 pretrain cache (or runs it itself).
     "experiments/ablation/transfer/a_t1_no_finetune.yaml",
-    # 2. Reference main result; populates pretrain cache reused above.
+    # 3. Reference main result; populates pretrain cache reused above.
     "experiments/main/m1_ours.yaml",
-    # 3. Same arch as m1, different target parameterization.
+    # 4. Same arch as m1, different target parameterization.
     "experiments/ablation/physics/a_p1_predict_absolute.yaml",
-    # 4. Same-size MLP baseline.
+    # 5. Wang-style DNN baseline under the same TL protocol.
+    "experiments/main/wang_dnn_tl.yaml",
+    # 6. Same-size MLP baseline (architecture ablation).
     "experiments/main/m2_mlp.yaml",
-    # 5. Kaggle-only, fast per epoch but many epochs.
+    # 7. Kaggle-only, fast per epoch but many epochs.
     "experiments/ablation/transfer/a_t2_no_pretrain.yaml",
-    # 6. Joint pretrain+finetune merge.
+    # 8. Joint pretrain+finetune merge.
     "experiments/ablation/transfer/a_t3_joint.yaml",
-    # 7. Medium-weight 1D CNN baseline.
+    # 9. Medium-weight 1D CNN baseline (architecture ablation).
     "experiments/main/m3_cnn1d.yaml",
-    # 8. Heaviest — last.
+    # 10. Heaviest — last (architecture ablation).
     "experiments/main/m4_transformer.yaml",
 ]
 

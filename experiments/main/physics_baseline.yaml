@@ -1,0 +1,16 @@
+base: ../base.yaml
+name: physics_baseline
+
+# Non-trainable analytical reference. The `physics_baseline` model returns
+# zeros, and because `predict_absolute: false` the runner adds the analytical
+# `target_gain + target_gain_tilt * (47 - j) / 94` baseline back at inference,
+# so the saved submission is exactly `baseline * mask`.
+#
+# `stages: []` means orchestrate() runs no training; `metrics.json` and
+# `submission.csv` are still produced via the standard predict_test() path.
+
+model:
+  name: physics_baseline
+  predict_absolute: false       # baseline is added back at inference
+
+stages: []

@@ -1,0 +1,34 @@
+base: ../base.yaml
+name: wang_dnn_tl
+
+# Wang-DNN-TL (global adapted).
+# Wang et al. 2023 dense DNN architecture (Sec. 5, Fig. 9), adapted to our
+# global multi-EDFA input feature schema and trained under the same
+# COSMOS pretrain -> OFC/Kaggle finetune protocol used by `m1_ours`.
+#
+# Faithful to Wang:
+#   * Hidden widths [256, 128, 128, 128] with BatchNorm + ELU.
+#   * Linear 95-channel output, no activation.
+#   * Kaiming-normal init on all dense layers.
+#   * Masked MSE loss on activated channels (inherited via base.yaml).
+#   * Adam optimizer, lr 1e-3, gradient clipping 3.0 for the COSMOS-pretrain
+#     stage (matches Wang's standalone-DNN training settings).
+#
+# Deliberately not faithful (see docs/wang_dnn_vs_ours_spec.md §2):
+#   * Single global model, not per-device component-level models.
+#   * Our two-stage TL protocol (no freeze-output-layer phase).
+#   * Wider input vector to encode EDFA_type / edfa_index for global modeling.
+
+model:
+  name: wang_dnn
+  hidden_dims: [256, 128, 128, 128]
+  dropout: 0.0
+  predict_absolute: true        # Wang predicts absolute gain spectrum.
+
+stages: [pretrain, finetune]
+
+pretrain:
+  grad_clip: 3.0                # Wang standalone-DNN clipping threshold.
+
+finetune:
+  grad_clip: 3.0
