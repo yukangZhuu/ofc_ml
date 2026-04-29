@@ -28,6 +28,12 @@ model:
   hidden_dims: [256, 256, 128, 128, 128]
   dropout: 0.2
   n_frequencies: 4
+  # SpectralMixing was retired from the main configuration: in our 4-seed
+  # study its learnable gates collapsed to |g| < 0.025 and removing the
+  # module did not change MAE (paired-t p ~ 0.46, see docs/experiments.md
+  # for the analysis). The implementation is preserved in
+  # src/ofc_ml/models/hybrid_fno_kan.py for completeness; flip the flag
+  # below to True (and keep spectral_freq_ratio set) to re-enable it.
   spectral_freq_ratio: 0.5
   use_spectral_mixing: false
   use_fourier_kan: true
