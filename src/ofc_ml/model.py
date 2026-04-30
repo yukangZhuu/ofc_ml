@@ -178,6 +178,7 @@ def make_dataloaders(
     val_size: float,
     random_state: int,
     device: torch.device,
+    drop_last: bool = False,
 ) -> Tuple[DataLoader, DataLoader]:
     n = len(X)
     if n < 2 or val_size is None or val_size <= 0.0:
@@ -197,10 +198,10 @@ def make_dataloaders(
     pin = device.type == "cuda"
     generator = torch.Generator()
     generator.manual_seed(int(random_state))
-    # `drop_last=True` on the training loader is safe for all models and is
-    # required for BatchNorm-based models (e.g. Wang DNN) on small datasets,
-    # because a residual final batch of size 1 makes BN error out in
-    # training mode.  At most `batch_size - 1` samples per epoch are skipped.
+    # `drop_last` is decided by the caller and defaults to False; the trainer
+    # passes `drop_last=True` only for BatchNorm-using models (e.g. Wang DNN)
+    # to avoid a singleton tail batch crashing BN in training mode.  Non-BN
+    # models keep the pre-Wang-DNN behavior of seeing every sample per epoch.
     train_loader = DataLoader(
         tr,
         batch_size=batch_size,
@@ -208,7 +209,7 @@ def make_dataloaders(
         num_workers=nw,
         pin_memory=pin,
         generator=generator,
-        drop_last=True,
+        drop_last=drop_last,
     )
     val_loader = DataLoader(val, batch_size=batch_size, shuffle=False, num_workers=nw, pin_memory=pin)
     return train_loader, val_loader
@@ -474,12 +475,21 @@ def _run_stage(
     torch.manual_seed(stage_seed)
     if device.type == "cuda":
         torch.cuda.manual_seed_all(stage_seed)
+    # Only drop the trailing partial batch when the model contains a BatchNorm
+    # layer (e.g. Wang-DNN), which would otherwise crash on a singleton tail
+    # batch in training mode.  Non-BN models keep the pre-Wang-DNN behaviour
+    # of seeing every sample per epoch, since dropping samples can subtly
+    # shift convergence / OOD generalisation.
+    has_bn = any(
+        isinstance(m, nn.modules.batchnorm._BatchNorm) for m in model.modules()
+    )
     train_loader, val_loader = make_dataloaders(
         data["X"], data["y"], data["tg"], data["tgt"], data["mask"],
         batch_size=stage_cfg.batch_size,
         val_size=val_size,
         random_state=random_state,
         device=device,
+        drop_last=has_bn,
     )
     criterion = build_loss(stage_cfg.loss)
     trainer = Trainer(
@@ -567,12 +577,16 @@ def _run_phase(
     if device.type == "cuda":
         torch.cuda.manual_seed_all(stage_seed)
 
+    has_bn = any(
+        isinstance(m, nn.modules.batchnorm._BatchNorm) for m in model.modules()
+    )
     train_loader, val_loader = make_dataloaders(
         data["X"], data["y"], data["tg"], data["tgt"], data["mask"],
         batch_size=batch_size,
         val_size=cfg_exp.data.val_size,
         random_state=cfg_exp.data.random_state,
         device=device,
+        drop_last=has_bn,
     )
 
     # Build a synthetic StageConfig so we can reuse build_optimizer.
