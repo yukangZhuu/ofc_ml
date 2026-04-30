@@ -148,6 +148,10 @@ class TestExperimentYamls(unittest.TestCase):
         # Pretrain on COSMOS keeps BN active; finetune freezes it.
         self.assertFalse(cfg.pretrain.freeze_batchnorm)
         self.assertTrue(cfg.finetune.freeze_batchnorm)
+        # Wang DNN's BN requires drop_last on both stages so the trainer
+        # never feeds it a singleton tail batch.
+        self.assertTrue(cfg.pretrain.drop_last)
+        self.assertTrue(cfg.finetune.drop_last)
 
     def test_physics_baseline_loads_with_empty_stages(self):
         cfg = load_experiment_config("experiments/main/physics_baseline.yaml")
@@ -157,10 +161,75 @@ class TestExperimentYamls(unittest.TestCase):
         self.assertEqual(list(cfg.stages), [])
 
     def test_existing_main_configs_unaffected(self):
-        cfg = load_experiment_config("experiments/main/m1_ours.yaml")
-        self.assertEqual(cfg.name, "m1_ours")
-        self.assertEqual(cfg.model.name, "hybrid_fno_kan")
-        self.assertFalse(cfg.model.predict_absolute)
+        # m1_ours / m2_mlp / m3_cnn1d / m4_transformer must keep
+        # `drop_last=False` on every stage; otherwise we silently
+        # re-introduce the d87ba13 regression that flipped m1_ours vs m2_mlp.
+        for stem in ["m1_ours", "m2_mlp", "m3_cnn1d", "m4_transformer"]:
+            cfg = load_experiment_config(f"experiments/main/{stem}.yaml")
+            self.assertEqual(cfg.name, stem)
+            self.assertFalse(cfg.pretrain.drop_last,
+                             msg=f"{stem}.pretrain.drop_last must default to False")
+            self.assertFalse(cfg.finetune.drop_last,
+                             msg=f"{stem}.finetune.drop_last must default to False")
+            self.assertFalse(cfg.pretrain.freeze_batchnorm)
+            self.assertFalse(cfg.finetune.freeze_batchnorm)
+
+
+class TestDataloaderDropLast(unittest.TestCase):
+    """Guard against re-introducing the d87ba13 always-on `drop_last` bug."""
+
+    def _make(self, n: int, batch_size: int, drop_last: bool):
+        from ofc_ml.model import make_dataloaders
+        rng = np.random.default_rng(0)
+        X = rng.standard_normal((n, 8)).astype(np.float32)
+        y = rng.standard_normal((n, 4)).astype(np.float32)
+        tg = rng.standard_normal(n).astype(np.float32)
+        tgt = rng.standard_normal(n).astype(np.float32)
+        mask = np.ones((n, 4), dtype=np.float32)
+        return make_dataloaders(
+            X, y, tg, tgt, mask,
+            batch_size=batch_size,
+            val_size=0.05,
+            random_state=0,
+            device=torch.device("cpu"),
+            drop_last=drop_last,
+        )
+
+    def test_default_keeps_partial_tail_batch(self):
+        # 100 rows, val_size=0.05 -> ~95 train, batch=32 -> 2 full + 1 tail (31).
+        train, _ = self._make(100, 32, drop_last=False)
+        sizes = [b[0].shape[0] for b in train]
+        self.assertEqual(sum(sizes), 95)
+        self.assertEqual(min(sizes), 95 - 32 * 2)  # tail is the leftover
+
+    def test_drop_last_drops_partial_tail_batch(self):
+        train, _ = self._make(100, 32, drop_last=True)
+        sizes = [b[0].shape[0] for b in train]
+        # 95 train -> 2 full batches of 32, the 31-sample tail is dropped.
+        self.assertEqual(sizes, [32, 32])
+
+    def test_drop_last_does_not_starve_smoke_runs(self):
+        # When the entire training set is smaller than a single batch we keep
+        # the only batch even with drop_last=True so smoke tests still get one
+        # optimizer step per epoch.
+        train, _ = self._make(40, 256, drop_last=True)
+        sizes = [b[0].shape[0] for b in train]
+        self.assertEqual(len(sizes), 1)
+        self.assertGreater(sizes[0], 1)
+
+
+class TestArchSignatureSeparatesDropLast(unittest.TestCase):
+    """`drop_last` must change the pretrain cache hash, otherwise m1_ours and
+    wang_dnn_tl could mistakenly share a checkpoint."""
+
+    def test_drop_last_flag_changes_hash(self):
+        from ofc_ml.model import _arch_signature
+        cfg_a = load_experiment_config("experiments/main/m1_ours.yaml")
+        cfg_b = load_experiment_config("experiments/main/m1_ours.yaml")
+        cfg_b.pretrain.drop_last = True
+        sig_a = _arch_signature(cfg_a, input_dim=204)
+        sig_b = _arch_signature(cfg_b, input_dim=204)
+        self.assertNotEqual(sig_a, sig_b)
 
 
 class TestRunMatrixOrdering(unittest.TestCase):

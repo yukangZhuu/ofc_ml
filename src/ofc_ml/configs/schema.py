@@ -103,6 +103,16 @@ class StageConfig:
     # Wang-DNN-TL baseline (see docs/wang_dnn_vs_ours_spec.md §3.6).  Defaults
     # to False so existing experiments are unaffected.
     freeze_batchnorm: bool = False
+    # When True, the training DataLoader for this stage drops its trailing
+    # partial batch.  Required for BatchNorm-based models (e.g. Wang DNN)
+    # because BN errors out on a singleton tail batch in training mode.
+    # Defaults to False so non-BN models (FourierKAN / MLP / Transformer)
+    # continue to see every training sample per epoch.  Was previously
+    # hardcoded to True globally in commit `d87ba13`, which we observed to
+    # cause a measurable regression on m1_ours / m2_mlp because the
+    # systematically-dropped tail batches biased the optimisation trajectory
+    # over hundreds of epochs.
+    drop_last: bool = False
 
 
 @dataclass

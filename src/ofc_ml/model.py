@@ -51,7 +51,7 @@ from .models import build_model, count_parameters
 from .network import OFCDataset, compute_baseline_gain
 
 
-CACHE_VERSION = "fno_zero_high_modes_gated_rng_fair_stage_seed_v4"
+CACHE_VERSION = "per_stage_drop_last_v6"
 
 
 # ---------------------------------------------------------------------- #
@@ -178,6 +178,7 @@ def make_dataloaders(
     val_size: float,
     random_state: int,
     device: torch.device,
+    drop_last: bool = False,
 ) -> Tuple[DataLoader, DataLoader]:
     n = len(X)
     if n < 2 or val_size is None or val_size <= 0.0:
@@ -197,19 +198,12 @@ def make_dataloaders(
     pin = device.type == "cuda"
     generator = torch.Generator()
     generator.manual_seed(int(random_state))
-    # Drop the trailing partial batch when there is enough data to do so, so
-    # that BatchNorm1d-based models (e.g. WangDNNPredictor) never see a
-    # singleton tail batch.  When the entire training set is smaller than a
-    # single batch (e.g. heavily-subsampled smoke tests) we leave drop_last off
-    # so we still produce one batch per epoch.
-    drop_last = len(tr) > batch_size
-    # Diagnostic override: setting OFC_DROP_LAST=0 in the environment forces
-    # drop_last=False everywhere.  Used only to investigate whether the
-    # drop_last flip introduced in `d87ba13` regressed m1_ours vs m2_mlp.
-    import os as _os
-    _override = _os.environ.get("OFC_DROP_LAST")
-    if _override is not None:
-        drop_last = _override.strip().lower() in {"1", "true", "yes"}
+    # `drop_last` is decided by the caller (typically `_run_stage` reading
+    # `StageConfig.drop_last`) and defaults to False.  The training loader
+    # only drops the trailing partial batch when there is enough data to do
+    # so; when the entire training set is smaller than a single batch we
+    # always keep the (only) batch so smoke tests still produce one step.
+    effective_drop_last = bool(drop_last) and len(tr) > batch_size
     train_loader = DataLoader(
         tr,
         batch_size=batch_size,
@@ -217,7 +211,7 @@ def make_dataloaders(
         num_workers=nw,
         pin_memory=pin,
         generator=generator,
-        drop_last=drop_last,
+        drop_last=effective_drop_last,
     )
     val_loader   = DataLoader(val, batch_size=batch_size, shuffle=False, num_workers=nw, pin_memory=pin)
     return train_loader, val_loader
@@ -491,6 +485,7 @@ def _run_stage(
         val_size=val_size,
         random_state=random_state,
         device=device,
+        drop_last=getattr(stage_cfg, "drop_last", False),
     )
     criterion = build_loss(stage_cfg.loss)
     trainer = Trainer(

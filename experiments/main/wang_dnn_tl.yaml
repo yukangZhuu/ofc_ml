@@ -29,9 +29,14 @@ stages: [pretrain, finetune]
 
 pretrain:
   grad_clip: 3.0                # Wang standalone-DNN clipping threshold.
+  # BatchNorm cannot accept a singleton tail batch in training mode, so the
+  # train DataLoader drops it.  Required for Wang DNN; left off elsewhere so
+  # FourierKAN / MLP / Transformer continue to see every sample per epoch.
+  drop_last: true
 
 finetune:
   grad_clip: 3.0
+  drop_last: true
   # Hold every BatchNorm in eval mode and freeze its affine parameters during
   # finetune.  Without this the BN running statistics learnt on the large
   # COSMOS pretrain set get overwritten by a few small Kaggle batches and the

@@ -213,15 +213,34 @@ stages: [pretrain, finetune]
 
 pretrain:
   grad_clip: 3.0                # Wang paper standalone DNN value
+  drop_last: true               # see §3.7
 
 finetune:
   grad_clip: 3.0
+  drop_last: true               # see §3.7
   freeze_batchnorm: true        # see §3.6
 ```
 
 Everything not overridden is inherited from `experiments/base.yaml`, which
 already encodes Wang's standalone DNN settings on the pretrain side
 (`Adam`, lr `1e-3`, weight decay `1e-4`, batch size `256`).
+
+### 3.7 Per-stage `drop_last`
+
+`BatchNorm1d` cannot accept a singleton tail batch in training mode, so the
+training DataLoader for any Wang-DNN stage drops its trailing partial batch.
+This is exposed as a per-stage flag `StageConfig.drop_last` (default `False`)
+and explicitly set to `true` for both Wang stages.
+
+It is **not** turned on globally for non-BN models. We previously enabled
+`drop_last=True` unconditionally inside `make_dataloaders` (commit
+`d87ba13`), but that systematically dropped the last ~200 COSMOS samples
+per pretrain epoch (out of ~39368) and the last 1 Kaggle sample per
+finetune epoch. Across hundreds of epochs the deterministic-tail drop
+shifted m1_ours and m2_mlp's optimisation trajectories enough to flip
+their relative ranking on the OFC test set. Reverting `drop_last` to
+False for non-BN models reproduced the pre-`d87ba13` numbers bit-for-bit
+(see commit message of the per-stage `drop_last` fix).
 
 ---
 
