@@ -203,6 +203,13 @@ def make_dataloaders(
     # single batch (e.g. heavily-subsampled smoke tests) we leave drop_last off
     # so we still produce one batch per epoch.
     drop_last = len(tr) > batch_size
+    # Diagnostic override: setting OFC_DROP_LAST=0 in the environment forces
+    # drop_last=False everywhere.  Used only to investigate whether the
+    # drop_last flip introduced in `d87ba13` regressed m1_ours vs m2_mlp.
+    import os as _os
+    _override = _os.environ.get("OFC_DROP_LAST")
+    if _override is not None:
+        drop_last = _override.strip().lower() in {"1", "true", "yes"}
     train_loader = DataLoader(
         tr,
         batch_size=batch_size,
